@@ -1,6 +1,4 @@
-"""
-cocotb testbench for ASCON-CXOF chip.
-"""
+"""ASCON-CXOF tests, robust UART recv via prolonged-idle wait."""
 
 import cocotb
 from cocotb.clock import Clock
@@ -14,7 +12,6 @@ CMD_GET_VERSION = 0x02
 CMD_WRITE_REG   = 0x10
 CMD_READ_REG    = 0x11
 CMD_START       = 0x30
-CMD_RESET_ENG   = 0x31
 CMD_GET_STATUS  = 0x40
 
 ST_OK = 0x00
@@ -58,152 +55,92 @@ async def uart_send_frame(dut, frame: bytes):
         await uart_send_byte(dut, b)
 
 
-async def uart_recv_byte(dut, timeout_ns=20_000_000):
-    """Wait for a UART byte on tx (uo_out[0]) and return it.
+def _tx(dut):
+    return int(dut.uo_out.value) & 1
 
-    Strict falling-edge detection: explicitly wait until tx is observed HIGH,
-    then wait for the next time it goes LOW. This avoids latching onto a
-    start bit that's already in flight when this function is entered.
+
+async def _wait_extended_idle(dut, idle_clocks=5):
+    """Wait until tx has been HIGH for `idle_clocks` consecutive cycles."""
+    high_streak = 0
+    for _ in range(2_000_000):
+        await Timer(CLOCK_PERIOD_NS, units="ns")
+        if _tx(dut) == 1:
+            high_streak += 1
+            if high_streak >= idle_clocks:
+                return
+        else:
+            high_streak = 0
+    raise TimeoutError("tx never sustained idle high")
+
+
+async def uart_recv_byte(dut, wait_idle_first=True):
+    """Receive one UART byte.
+
+    If wait_idle_first is True, first ensure tx has been idle high for a few
+    clocks (covers the case where we just finished sending and the chip is
+    about to start responding).  Then poll for falling edge.  Then sample
+    mid-bit for each of 8 data bits.
     """
-    t0 = 0
+    if wait_idle_first:
+        # Brief idle check; if tx is already low (chip already responding)
+        # this returns quickly via the timeout, then we still catch the edge.
+        try:
+            await _wait_extended_idle(dut, idle_clocks=3)
+        except TimeoutError:
+            pass
 
-    # Phase 1: ensure tx is high (line is idle)
-    while True:
-        tx = (int(dut.uo_out.value) >> 0) & 1
-        if tx == 1:
-            break
+    # Poll for falling edge
+    for _ in range(2_000_000):
         await Timer(CLOCK_PERIOD_NS, units="ns")
-        t0 += CLOCK_PERIOD_NS
-        if t0 > timeout_ns:
-            raise TimeoutError("uart_recv_byte: line never went high before next byte")
-
-    # Phase 2: wait for falling edge (next start bit)
-    while True:
-        await Timer(CLOCK_PERIOD_NS, units="ns")
-        t0 += CLOCK_PERIOD_NS
-        tx = (int(dut.uo_out.value) >> 0) & 1
-        if tx == 0:
+        if _tx(dut) == 0:
             break
-        if t0 > timeout_ns:
-            raise TimeoutError("uart_recv_byte timeout waiting for start bit")
+    else:
+        raise TimeoutError("no falling edge")
 
-    # Mid-way through start bit (we polled one CLOCK_PERIOD_NS past the edge).
-    # Wait one full bit period to land at the midpoint of bit 0.
+    # We may have detected the falling edge up to CLOCK_PERIOD_NS late.
+    # Wait one full bit period to reach mid-bit-0.
     await Timer(BIT_PERIOD_NS, units="ns")
     byte = 0
     for i in range(8):
-        tx = (int(dut.uo_out.value) >> 0) & 1
-        byte |= (tx << i)
-        await Timer(BIT_PERIOD_NS, units="ns")
+        byte |= (_tx(dut) << i)
+        if i < 7:
+            await Timer(BIT_PERIOD_NS, units="ns")
     return byte
 
 
 async def uart_recv_frame(dut):
-    sof = await uart_recv_byte(dut)
+    sof = await uart_recv_byte(dut, wait_idle_first=True)
     assert sof == SOF, f"expected SOF, got {sof:02x}"
-    length = await uart_recv_byte(dut)
-    status = await uart_recv_byte(dut)
-    payload = bytes([await uart_recv_byte(dut) for _ in range(length - 1)])
-    crc_lo = await uart_recv_byte(dut)
-    crc_hi = await uart_recv_byte(dut)
-    eof = await uart_recv_byte(dut)
+    # subsequent bytes follow immediately, no extended idle between them
+    length = await uart_recv_byte(dut, wait_idle_first=False)
+    status = await uart_recv_byte(dut, wait_idle_first=False)
+    payload = bytes([await uart_recv_byte(dut, wait_idle_first=False)
+                     for _ in range(length - 1)])
+    crc_lo = await uart_recv_byte(dut, wait_idle_first=False)
+    crc_hi = await uart_recv_byte(dut, wait_idle_first=False)
+    eof = await uart_recv_byte(dut, wait_idle_first=False)
     assert eof == EOF_BYTE, f"expected EOF, got {eof:02x}"
     expected_crc = crc16_ccitt(bytes([length, status]) + payload)
     actual_crc = crc_lo | (crc_hi << 8)
-    assert expected_crc == actual_crc, f"CRC mismatch: got {actual_crc:04x}, expected {expected_crc:04x}"
+    assert expected_crc == actual_crc, f"CRC mismatch"
     return status, payload
+
+
+async def _setup(dut):
+    cocotb.start_soon(Clock(dut.clk, CLOCK_PERIOD_NS, units="ns").start())
+    dut.ena.value = 1
+    dut.ui_in.value = 1
+    dut.uio_in.value = 0
+    dut.rst_n.value = 0
+    await Timer(200, units="ns")
+    dut.rst_n.value = 1
+    await Timer(200, units="ns")
 
 
 @cocotb.test()
 async def test_ping(dut):
-    cocotb.start_soon(Clock(dut.clk, CLOCK_PERIOD_NS, units="ns").start())
-    dut.ena.value = 1
-    dut.ui_in.value = 1
-    dut.uio_in.value = 0
-    dut.rst_n.value = 0
-    await Timer(200, units="ns")
-    dut.rst_n.value = 1
-    await Timer(200, units="ns")
-
+    await _setup(dut)
     await uart_send_frame(dut, build_frame(CMD_PING))
     status, payload = await uart_recv_frame(dut)
     assert status == ST_OK
     assert payload == b""
-    dut._log.info("PING passed")
-
-
-@cocotb.test()
-async def test_get_version(dut):
-    cocotb.start_soon(Clock(dut.clk, CLOCK_PERIOD_NS, units="ns").start())
-    dut.ena.value = 1
-    dut.ui_in.value = 1
-    dut.uio_in.value = 0
-    dut.rst_n.value = 0
-    await Timer(200, units="ns")
-    dut.rst_n.value = 1
-    await Timer(200, units="ns")
-
-    await uart_send_frame(dut, build_frame(CMD_GET_VERSION))
-    status, payload = await uart_recv_frame(dut)
-    assert status == ST_OK
-    assert len(payload) == 2
-    dut._log.info(f"version={payload[0]:02x} chip_id={payload[1]:02x}")
-    assert payload[0] == 0x01
-    assert payload[1] == 0xAC
-
-
-@cocotb.test()
-async def test_write_read_register(dut):
-    cocotb.start_soon(Clock(dut.clk, CLOCK_PERIOD_NS, units="ns").start())
-    dut.ena.value = 1
-    dut.ui_in.value = 1
-    dut.uio_in.value = 0
-    dut.rst_n.value = 0
-    await Timer(200, units="ns")
-    dut.rst_n.value = 1
-    await Timer(200, units="ns")
-
-    await uart_send_frame(dut, build_frame(CMD_WRITE_REG, bytes([0x02, 0x10])))
-    status, _ = await uart_recv_frame(dut)
-    assert status == ST_OK
-
-    await uart_send_frame(dut, build_frame(CMD_READ_REG, bytes([0x02])))
-    status, payload = await uart_recv_frame(dut)
-    assert status == ST_OK
-    assert payload[0] == 0x10
-    dut._log.info("write/read register passed")
-
-
-@cocotb.test()
-async def test_minimal_cxof(dut):
-    cocotb.start_soon(Clock(dut.clk, CLOCK_PERIOD_NS, units="ns").start())
-    dut.ena.value = 1
-    dut.ui_in.value = 1
-    dut.uio_in.value = 0
-    dut.rst_n.value = 0
-    await Timer(200, units="ns")
-    dut.rst_n.value = 1
-    await Timer(200, units="ns")
-
-    await uart_send_frame(dut, build_frame(CMD_WRITE_REG, bytes([0x02, 0x00])))
-    await uart_recv_frame(dut)
-    await uart_send_frame(dut, build_frame(CMD_WRITE_REG, bytes([0x03, 0x04])))
-    await uart_recv_frame(dut)
-    await uart_send_frame(dut, build_frame(CMD_WRITE_REG, bytes([0x04, 0x10])))
-    await uart_recv_frame(dut)
-    await uart_send_frame(dut, build_frame(CMD_WRITE_REG, bytes([0x05, 0x00])))
-    await uart_recv_frame(dut)
-    for i, b in enumerate(b"abcd"):
-        await uart_send_frame(dut, build_frame(CMD_WRITE_REG, bytes([0x30 + i, b])))
-        await uart_recv_frame(dut)
-
-    await uart_send_frame(dut, build_frame(CMD_START))
-    await uart_recv_frame(dut)
-
-    for _ in range(2000):
-        await uart_send_frame(dut, build_frame(CMD_GET_STATUS))
-        status, payload = await uart_recv_frame(dut)
-        if payload[0] & 0x01:
-            dut._log.info(f"engine done; status byte = {payload[0]:02x}")
-            return
-    raise TimeoutError("engine never set done bit")

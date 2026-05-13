@@ -1,35 +1,31 @@
 /*
  * ASCON-CXOF mode controller.
  *
- * Sequences the ASCON permutation through the CXOF (Customizable Extendable
- * Output Function) phases per NIST SP 800-232.
+ * Direct port of the ASCON team's official C reference
+ * (https://github.com/ascon/ascon-c, crypto_cxof/asconcxof128/ref/hash.c).
  *
- * CXOF128 parameters:
- *   - rate: 64 bits (8 bytes) per absorb/squeeze block
- *   - capacity: 256 bits
- *   - permutation: p[12] for init, absorb, and squeeze
- *   - IV: scheme-specific constant (defined below)
+ * Algorithm:
+ *   1. state = (IV, 0, 0, 0, 0); P12
+ *   2. x[0] ^= cslen*8 (bit-length encoding); P12
+ *   3. while cs_remaining >= 8: x[0] ^= LOADBYTES(cs,8); P12; advance 8 bytes
+ *   4. x[0] ^= LOADBYTES(cs, cs_remaining) ^ PAD(cs_remaining); P12   (ALWAYS)
+ *   5. while msg_remaining >= 8: x[0] ^= LOADBYTES(msg,8); P12; advance 8 bytes
+ *   6. x[0] ^= LOADBYTES(msg, msg_remaining) ^ PAD(msg_remaining); P12  (ALWAYS)
+ *   7. while out_remaining > 8: emit x[0] (8 bytes); P12; advance
+ *   8. emit x[0] (out_remaining bytes); DONE
  *
- * Simplified flow (assumes cs_length and msg_length each <= 32 bytes; cap
- * fits in this tile budget):
+ * Byte order (matches C reference's LOADBYTES on little-endian host):
+ *   byte 0 of input -> x0[7:0]    (LSB end of word)
+ *   byte 1          -> x0[15:8]
+ *   ...
+ *   byte 7          -> x0[63:56]
  *
- *   1. INIT:   state = IV || 0...0 (320 bits), run p[12]
- *   2. ABSORB_CS: absorb the customization-string-length encoding,
- *      then absorb cs_data in 8-byte blocks, each followed by p[12].
- *      Apply padding to the final block.
- *      Apply domain separator.
- *   3. ABSORB_MSG: absorb msg_data in 8-byte blocks, each followed by p[12].
- *      Apply padding. Apply domain separator.
- *   4. SQUEEZE: emit 8 bytes from rate region, run p[12], repeat until
- *      out_length bytes emitted (cap at 32 bytes for this implementation).
- *
- * IMPORTANT: This is a working skeleton. Test it against the reference Python
- * implementation in test/golden/ before tape-out. The exact bit-ordering of
- * padding and domain separators in CXOF needs to match the spec EXACTLY.
- *
- * For tomorrow's submission: this will get you a functionally-correct chip
- * even if some edge cases (e.g., cs_length=0, msg_length=0) need tweaking
- * after KAT validation.
+ * State layout (matches new ascon_round.v):
+ *   cxof_state[63:0]    = x0  (rate)
+ *   cxof_state[127:64]  = x1
+ *   cxof_state[191:128] = x2
+ *   cxof_state[255:192] = x3
+ *   cxof_state[319:256] = x4
  */
 
 `default_nettype none
@@ -42,12 +38,12 @@ module cxof_controller (
     input  wire         start,
     input  wire         reset_engine,
 
-    // Inputs
-    input  wire [319:0] cs_data,        // customization string (up to 32 bytes)
-    input  wire [7:0]   cs_length,      // in bytes (0..32)
-    input  wire [319:0] msg_data,       // message (up to 32 bytes)
-    input  wire [7:0]   msg_length,     // in bytes (0..32)
-    input  wire [15:0]  out_length,     // requested output length in bytes (capped at 32)
+    // Inputs from register file (byte 0 of each is at bits [7:0])
+    input  wire [255:0] cs_data,
+    input  wire [7:0]   cs_length,
+    input  wire [255:0] msg_data,
+    input  wire [7:0]   msg_length,
+    input  wire [15:0]  out_length,
 
     // Output
     output reg  [255:0] result_data,
@@ -58,13 +54,15 @@ module cxof_controller (
     output reg          done
 );
 
-    // ----- ASCON-CXOF128 IV -----
-    // Per NIST SP 800-232: IV encodes rate, capacity, rounds, security level.
-    // The exact byte ordering must match the spec — VERIFY against KAT before tape-out.
-    // Placeholder IV used here; replace with the spec-mandated value during testbench
-    // validation (the test harness's golden Python implementation will tell us if
-    // this is correct).
-    localparam [63:0] CXOF128_IV = 64'h80004008_00000000; // PLACEHOLDER - verify in sim
+    // ----- ASCON-CXOF128 IV (CORRECTED) -----
+    // ASCON_CXOF_VARIANT = 4        -> 0x04 at bit  0  (byte 0)
+    // ASCON_PA_ROUNDS = 12          -> 0x0C at bit 16  (low nibble of byte 2)
+    // ASCON_HASH_PB_ROUNDS = 12     -> 0xC0 at bit 20  (high nibble of byte 2)
+    // ASCON_HASH_RATE = 8           -> 0x08 at bit 40  (byte 5)
+    // Combined byte layout (byte 7..byte 0):
+    //   00 00 08 00 00 CC 00 04
+    // = 64'h0000080000CC0004
+    localparam [63:0] CXOF128_IV = 64'h0000_0800_00CC_0004;
 
     // ----- Permutation interface -----
     reg          perm_start;
@@ -85,68 +83,82 @@ module cxof_controller (
         .done       (perm_done)
     );
 
-    // ----- CXOF state machine -----
-    localparam S_IDLE        = 4'd0;
-    localparam S_INIT_PERM   = 4'd1;
-    localparam S_WAIT_INIT   = 4'd2;
-    localparam S_ABSORB_CS   = 4'd3;
-    localparam S_WAIT_CS     = 4'd4;
-    localparam S_DOMAIN_SEP1 = 4'd5;
-    localparam S_ABSORB_MSG  = 4'd6;
-    localparam S_WAIT_MSG    = 4'd7;
-    localparam S_DOMAIN_SEP2 = 4'd8;
-    localparam S_SQUEEZE     = 4'd9;
-    localparam S_WAIT_SQUEEZE= 4'd10;
-    localparam S_FINISH      = 4'd11;
+    // suppress unused warning
+    wire _unused = &{perm_busy, 1'b0};
 
-    reg [3:0]   state, state_next;
-    reg [319:0] cxof_state;     // current 320-bit ASCON state
-    reg [7:0]   absorb_offset;  // byte offset into cs_data or msg_data
-    reg [7:0]   absorb_target;  // total bytes to absorb in current phase
-    reg [15:0]  squeeze_count;  // bytes squeezed so far
-    reg [255:0] accumulated;    // output accumulator (32 bytes max)
-
-    // helper: extract 8 bytes (64 bits) from a 320-bit register at byte offset
-    // Returns the block, zero-padded if past length, with ASCON padding rule
-    // (0x80 appended to indicate end-of-message) applied when this is the last block.
-    function [63:0] absorb_block;
-        input [319:0] data;
-        input [7:0]   offset;       // starting byte
-        input [7:0]   total_bytes;  // total length of `data` in bytes
-        reg   [63:0]  block;
-        reg   [7:0]   bytes_left;
-        integer       i;
-        reg   [7:0]   byte_i;
+    // ----- PAD(i) lookup: returns 0x01 << (8*i) -----
+    function [63:0] pad_val;
+        input [3:0] i;
         begin
-            block = 64'h0;
-            bytes_left = (offset < total_bytes) ? (total_bytes - offset) : 8'd0;
-            for (i = 0; i < 8; i = i + 1) begin
-                // ASCON convention: byte 0 is the most-significant byte of the 64-bit word
-                // (this is the standard "first byte = MSB" bit ordering for ASCON)
-                if (i < bytes_left) begin
-                    // extract byte at position (offset + i) from data
-                    // data[319:0]: byte 0 is data[319:312], byte 1 is data[311:304], ...
-                    byte_i = data[(319 - 8*(offset + i)) -: 8];
-                    block[(63 - 8*i) -: 8] = byte_i;
-                end else if (i == bytes_left) begin
-                    // ASCON padding: 0x80 marks the end-of-message bit
-                    block[(63 - 8*i) -: 8] = 8'h80;
-                end
-                // else: leave as 0
-            end
-            absorb_block = block;
+            case (i[2:0])
+                3'd0: pad_val = 64'h0000_0000_0000_0001;
+                3'd1: pad_val = 64'h0000_0000_0000_0100;
+                3'd2: pad_val = 64'h0000_0000_0001_0000;
+                3'd3: pad_val = 64'h0000_0000_0100_0000;
+                3'd4: pad_val = 64'h0000_0001_0000_0000;
+                3'd5: pad_val = 64'h0000_0100_0000_0000;
+                3'd6: pad_val = 64'h0001_0000_0000_0000;
+                3'd7: pad_val = 64'h0100_0000_0000_0000;
+                default: pad_val = 64'h0;
+            endcase
         end
     endfunction
 
-    // ----- main FSM -----
+    // ----- MASK(n): returns mask for first n bytes (n=0..7) -----
+    function [63:0] mask_n;
+        input [3:0] n;
+        begin
+            case (n[2:0])
+                3'd0: mask_n = 64'h0000_0000_0000_0000;
+                3'd1: mask_n = 64'h0000_0000_0000_00FF;
+                3'd2: mask_n = 64'h0000_0000_0000_FFFF;
+                3'd3: mask_n = 64'h0000_0000_00FF_FFFF;
+                3'd4: mask_n = 64'h0000_0000_FFFF_FFFF;
+                3'd5: mask_n = 64'h0000_00FF_FFFF_FFFF;
+                3'd6: mask_n = 64'h0000_FFFF_FFFF_FFFF;
+                3'd7: mask_n = 64'h00FF_FFFF_FFFF_FFFF;
+                default: mask_n = 64'h0;
+            endcase
+        end
+    endfunction
+
+    // ----- FSM states -----
+    localparam S_IDLE         = 4'd0;
+    localparam S_INIT_KICK    = 4'd1;
+    localparam S_INIT_WAIT    = 4'd2;
+    localparam S_LEN_KICK     = 4'd3;
+    localparam S_LEN_WAIT     = 4'd4;
+    localparam S_CS_KICK      = 4'd5;
+    localparam S_CS_WAIT      = 4'd6;
+    localparam S_CS_FIN_KICK  = 4'd7;
+    localparam S_CS_FIN_WAIT  = 4'd8;
+    localparam S_MSG_KICK     = 4'd9;
+    localparam S_MSG_WAIT     = 4'd10;
+    localparam S_MSG_FIN_KICK = 4'd11;
+    localparam S_MSG_FIN_WAIT = 4'd12;
+    localparam S_SQ_KICK      = 4'd13;
+    localparam S_SQ_WAIT      = 4'd14;
+    localparam S_FINISH       = 4'd15;
+
+    reg [3:0]   state;
+    reg [319:0] cxof_state;
+    reg [255:0] cs_shift;
+    reg [255:0] msg_shift;
+    reg [7:0]   cs_remaining;
+    reg [7:0]   msg_remaining;
+    reg [15:0]  out_remaining;
+    reg [4:0]   squeeze_idx;
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state         <= S_IDLE;
             cxof_state    <= 320'd0;
-            absorb_offset <= 8'd0;
-            absorb_target <= 8'd0;
-            squeeze_count <= 16'd0;
-            accumulated   <= 256'd0;
+            cs_shift      <= 256'd0;
+            msg_shift     <= 256'd0;
+            cs_remaining  <= 8'd0;
+            msg_remaining <= 8'd0;
+            out_remaining <= 16'd0;
+            squeeze_idx   <= 5'd0;
             result_data   <= 256'd0;
             result_valid  <= 1'b0;
             busy          <= 1'b0;
@@ -160,124 +172,152 @@ module cxof_controller (
             done          <= 1'b0;
             perm_start    <= 1'b0;
         end else begin
-            // defaults
             perm_start <= 1'b0;
             done       <= 1'b0;
 
             case (state)
+
                 S_IDLE: begin
-                    busy         <= 1'b0;
-                    result_valid <= 1'b0;
+                    busy <= 1'b0;
                     if (start) begin
-                        // Initialize state: IV in top 64 bits, rest zero
-                        cxof_state    <= {CXOF128_IV, 256'd0};
-                        absorb_offset <= 8'd0;
-                        absorb_target <= cs_length;
-                        squeeze_count <= 16'd0;
-                        accumulated   <= 256'd0;
+                        cxof_state    <= {256'd0, CXOF128_IV};
+                        cs_shift      <= cs_data;
+                        msg_shift     <= msg_data;
+                        cs_remaining  <= cs_length;
+                        msg_remaining <= msg_length;
+                        out_remaining <= (out_length > 16'd32) ? 16'd32 : out_length;
+                        squeeze_idx   <= 5'd0;
+                        result_valid  <= 1'b0;
+                        result_data   <= 256'd0;
                         busy          <= 1'b1;
-                        state         <= S_INIT_PERM;
+                        state         <= S_INIT_KICK;
                     end
                 end
 
-                S_INIT_PERM: begin
+                S_INIT_KICK: begin
                     perm_state_in <= cxof_state;
                     perm_rounds   <= 4'd12;
                     perm_start    <= 1'b1;
-                    state         <= S_WAIT_INIT;
+                    state         <= S_INIT_WAIT;
                 end
-
-                S_WAIT_INIT: begin
+                S_INIT_WAIT: begin
                     if (perm_done) begin
                         cxof_state <= perm_state_out;
-                        state      <= S_ABSORB_CS;
+                        state      <= S_LEN_KICK;
                     end
                 end
 
-                S_ABSORB_CS: begin
-                    // XOR an 8-byte block into the rate region (top 64 bits of state)
-                    perm_state_in <= {cxof_state[319:256] ^ absorb_block(cs_data, absorb_offset, cs_length),
-                                      cxof_state[255:0]};
+                S_LEN_KICK: begin
+                    perm_state_in <= {cxof_state[319:64],
+                                      cxof_state[63:0] ^ {52'd0, cs_remaining, 3'b000}};
                     perm_rounds   <= 4'd12;
                     perm_start    <= 1'b1;
-                    state         <= S_WAIT_CS;
+                    state         <= S_LEN_WAIT;
                 end
-
-                S_WAIT_CS: begin
+                S_LEN_WAIT: begin
                     if (perm_done) begin
                         cxof_state <= perm_state_out;
-                        // advance offset; if more cs to absorb, loop; else move on
-                        if (absorb_offset + 8'd8 < cs_length) begin
-                            absorb_offset <= absorb_offset + 8'd8;
-                            state         <= S_ABSORB_CS;
-                        end else begin
-                            // CS absorption complete; apply domain separator
-                            state <= S_DOMAIN_SEP1;
-                        end
+                        state      <= (cs_remaining >= 8'd8) ? S_CS_KICK : S_CS_FIN_KICK;
                     end
                 end
 
-                S_DOMAIN_SEP1: begin
-                    // Toggle the domain-separation bit at the boundary between CS and message.
-                    // For ASCON-CXOF the DS bit is in the last byte of the capacity region.
-                    cxof_state    <= cxof_state ^ 320'd1;  // simplified DS toggle
-                    absorb_offset <= 8'd0;
-                    absorb_target <= msg_length;
-                    state         <= S_ABSORB_MSG;
-                end
-
-                S_ABSORB_MSG: begin
-                    perm_state_in <= {cxof_state[319:256] ^ absorb_block(msg_data, absorb_offset, msg_length),
-                                      cxof_state[255:0]};
+                S_CS_KICK: begin
+                    perm_state_in <= {cxof_state[319:64],
+                                      cxof_state[63:0] ^ cs_shift[63:0]};
                     perm_rounds   <= 4'd12;
                     perm_start    <= 1'b1;
-                    state         <= S_WAIT_MSG;
+                    state         <= S_CS_WAIT;
                 end
-
-                S_WAIT_MSG: begin
+                S_CS_WAIT: begin
                     if (perm_done) begin
-                        cxof_state <= perm_state_out;
-                        if (absorb_offset + 8'd8 < msg_length) begin
-                            absorb_offset <= absorb_offset + 8'd8;
-                            state         <= S_ABSORB_MSG;
-                        end else begin
-                            state <= S_DOMAIN_SEP2;
-                        end
+                        cxof_state   <= perm_state_out;
+                        cs_shift     <= {64'd0, cs_shift[255:64]};
+                        cs_remaining <= cs_remaining - 8'd8;
+                        if ((cs_remaining - 8'd8) >= 8'd8)
+                            state <= S_CS_KICK;
+                        else
+                            state <= S_CS_FIN_KICK;
                     end
                 end
 
-                S_DOMAIN_SEP2: begin
-                    // Second domain separator toggle (message-to-squeeze boundary)
-                    cxof_state    <= cxof_state ^ 320'd1;
-                    state         <= S_SQUEEZE;
+                S_CS_FIN_KICK: begin
+                    perm_state_in <= {cxof_state[319:64],
+                                      cxof_state[63:0]
+                                      ^ (cs_shift[63:0] & mask_n(cs_remaining[3:0]))
+                                      ^ pad_val(cs_remaining[3:0])};
+                    perm_rounds   <= 4'd12;
+                    perm_start    <= 1'b1;
+                    state         <= S_CS_FIN_WAIT;
+                end
+                S_CS_FIN_WAIT: begin
+                    if (perm_done) begin
+                        cxof_state <= perm_state_out;
+                        state      <= (msg_remaining >= 8'd8) ? S_MSG_KICK : S_MSG_FIN_KICK;
+                    end
                 end
 
-                S_SQUEEZE: begin
-                    // Emit current 8-byte block (rate region) and shift into accumulator.
-                    // accumulated[255:0] holds up to 32 bytes (4 blocks of 8 bytes).
-                    accumulated <= {accumulated[191:0], cxof_state[319:256]};
-                    squeeze_count <= squeeze_count + 16'd8;
-                    if (squeeze_count + 16'd8 >= out_length || squeeze_count + 16'd8 >= 16'd32) begin
-                        // enough output produced
-                        state <= S_FINISH;
-                    end else begin
-                        // run permutation again for next squeeze block
+                S_MSG_KICK: begin
+                    perm_state_in <= {cxof_state[319:64],
+                                      cxof_state[63:0] ^ msg_shift[63:0]};
+                    perm_rounds   <= 4'd12;
+                    perm_start    <= 1'b1;
+                    state         <= S_MSG_WAIT;
+                end
+                S_MSG_WAIT: begin
+                    if (perm_done) begin
+                        cxof_state    <= perm_state_out;
+                        msg_shift     <= {64'd0, msg_shift[255:64]};
+                        msg_remaining <= msg_remaining - 8'd8;
+                        if ((msg_remaining - 8'd8) >= 8'd8)
+                            state <= S_MSG_KICK;
+                        else
+                            state <= S_MSG_FIN_KICK;
+                    end
+                end
+
+                S_MSG_FIN_KICK: begin
+                    perm_state_in <= {cxof_state[319:64],
+                                      cxof_state[63:0]
+                                      ^ (msg_shift[63:0] & mask_n(msg_remaining[3:0]))
+                                      ^ pad_val(msg_remaining[3:0])};
+                    perm_rounds   <= 4'd12;
+                    perm_start    <= 1'b1;
+                    state         <= S_MSG_FIN_WAIT;
+                end
+                S_MSG_FIN_WAIT: begin
+                    if (perm_done) begin
+                        cxof_state <= perm_state_out;
+                        state      <= S_SQ_KICK;
+                    end
+                end
+
+                S_SQ_KICK: begin
+                    case (squeeze_idx)
+                        5'd0:  result_data[63:0]    <= cxof_state[63:0];
+                        5'd8:  result_data[127:64]  <= cxof_state[63:0];
+                        5'd16: result_data[191:128] <= cxof_state[63:0];
+                        5'd24: result_data[255:192] <= cxof_state[63:0];
+                        default: ;
+                    endcase
+                    if (out_remaining > 16'd8) begin
                         perm_state_in <= cxof_state;
                         perm_rounds   <= 4'd12;
                         perm_start    <= 1'b1;
-                        state         <= S_WAIT_SQUEEZE;
+                        squeeze_idx   <= squeeze_idx + 5'd8;
+                        out_remaining <= out_remaining - 16'd8;
+                        state         <= S_SQ_WAIT;
+                    end else begin
+                        state <= S_FINISH;
                     end
                 end
-
-                S_WAIT_SQUEEZE: begin
+                S_SQ_WAIT: begin
                     if (perm_done) begin
                         cxof_state <= perm_state_out;
-                        state      <= S_SQUEEZE;
+                        state      <= S_SQ_KICK;
                     end
                 end
 
                 S_FINISH: begin
-                    result_data  <= accumulated;
                     result_valid <= 1'b1;
                     busy         <= 1'b0;
                     done         <= 1'b1;

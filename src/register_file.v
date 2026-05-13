@@ -10,11 +10,16 @@
  *   0x04-0x05  OUT_LENGTH   (R/W) requested output length, little-endian
  *   0x10-0x2F  CS_DATA      (R/W) 32 bytes of customization string
  *   0x30-0x4F  MSG_DATA     (R/W) 32 bytes of message
- *   0x50-0x6F  RESULT       (R)   32 bytes of output (read after done)
- *   0x80       VERSION      (R)   constant 0x01 (protocol version)
- *   0x81       CHIP_ID      (R)   constant 0xAC ("AsCon")
+ *   0x50-0x6F  RESULT       (R)   32 bytes of output
+ *   0x80       VERSION      (R)   constant 0x01
+ *   0x81       CHIP_ID      (R)   constant 0xAC
  *
- * All multi-byte fields are little-endian on the wire.
+ * Byte ordering convention (matches ASCON C reference's LOADBYTES):
+ *   CS_DATA byte 0 -> cs_data[7:0]      (LSB end of register)
+ *   CS_DATA byte 1 -> cs_data[15:8]
+ *   ...
+ *   CS_DATA byte 31-> cs_data[255:248]
+ *   (same for MSG_DATA and RESULT)
  */
 
 `default_nettype none
@@ -30,10 +35,10 @@ module register_file (
     input  wire [7:0]   wdata,
     output reg  [7:0]   rdata,
 
-    // Engine-facing outputs
-    output reg  [319:0] cs_data,
+    // Engine-facing outputs (note: 256 bits, not 320 bits)
+    output reg  [255:0] cs_data,
     output reg  [7:0]   cs_length,
-    output reg  [319:0] msg_data,
+    output reg  [255:0] msg_data,
     output reg  [7:0]   msg_length,
     output reg  [15:0]  out_length,
 
@@ -47,7 +52,7 @@ module register_file (
     input  wire         engine_error
 );
 
-    // Cached result snapshot — when engine pulses result_valid, we latch it
+    // Cached result snapshot - latched on engine result_valid pulse
     reg [255:0] result_latched;
     reg         result_present;
 
@@ -60,57 +65,42 @@ module register_file (
                 result_latched <= result_data;
                 result_present <= 1'b1;
             end
-            // result_present cleared when engine starts a new operation
-            // (handled via the control register write below)
         end
     end
 
-    // Local copies of CS_DATA, MSG_DATA stored as flat 320-bit regs
-    // (byte 0 is MSB, matching the ASCON convention)
-
-    // helper: write byte at index i (0..31) into a 320-bit register
-    function [319:0] write_byte_32;
-        input [319:0] cur;
-        input [7:0]   idx;
+    // Helper: write byte at index i (0..31) into a 256-bit register.
+    // Convention: byte 0 lives at bits [7:0].
+    function [255:0] write_byte_32;
+        input [255:0] cur;
+        input [4:0]   idx;       // 0..31
         input [7:0]   data;
-        reg   [319:0] mask;
-        reg   [319:0] insert;
-        reg   [8:0]   shift_amt;   // 9 bits to hold 0..255 safely
+        reg   [7:0]   shift_amt;
+        reg   [255:0] mask;
+        reg   [255:0] insert;
         begin
-            shift_amt = 9'd312 - {1'b0, idx, 3'b0};  // bit position of byte idx (MSB-first)
-            mask      = 320'hff << shift_amt;
-            insert    = {312'd0, data} << shift_amt;
+            shift_amt = {idx, 3'b000};       // 8 * idx, fits in 8 bits (max 31*8=248)
+            mask      = 256'hFF << shift_amt;
+            insert    = {248'd0, data} << shift_amt;
             write_byte_32 = (cur & ~mask) | insert;
         end
     endfunction
 
-    // helper: read byte at index i (0..31) from a 320-bit register
+    // Helper: read byte at index i (0..31) from a 256-bit register.
     function [7:0] read_byte_32;
-        input [319:0] cur;
-        input [7:0]   idx;
-        reg   [8:0]   shift_amt;
-        begin
-            shift_amt = 9'd312 - {1'b0, idx, 3'b0};
-            read_byte_32 = (cur >> shift_amt) & 320'hff;
-        end
-    endfunction
-
-    // helper: read byte from result (256 bits = 32 bytes)
-    function [7:0] read_byte_result;
         input [255:0] cur;
-        input [7:0]   idx;
-        reg   [8:0]   shift_amt;
+        input [4:0]   idx;
+        reg   [7:0]   shift_amt;
         begin
-            shift_amt = 9'd248 - {1'b0, idx, 3'b0};
-            read_byte_result = (cur >> shift_amt) & 256'hff;
+            shift_amt = {idx, 3'b000};
+            read_byte_32 = (cur >> shift_amt) & 256'hFF;
         end
     endfunction
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            cs_data    <= 320'd0;
+            cs_data    <= 256'd0;
             cs_length  <= 8'd0;
-            msg_data   <= 320'd0;
+            msg_data   <= 256'd0;
             msg_length <= 8'd0;
             out_length <= 16'd0;
             rdata      <= 8'd0;
@@ -119,18 +109,17 @@ module register_file (
             if (we) begin
                 case (addr)
                     8'h01: begin
-                        // CONTROL register write — handled at top level via cmd_start.
-                        // Clearing result_present is also done by the parser via cmd_reset.
+                        // CONTROL register write - handled at top level via cmd_start/cmd_reset
                     end
-                    8'h02: cs_length  <= wdata;
-                    8'h03: msg_length <= wdata;
-                    8'h04: out_length[7:0]  <= wdata;
-                    8'h05: out_length[15:8] <= wdata;
+                    8'h02: cs_length         <= wdata;
+                    8'h03: msg_length        <= wdata;
+                    8'h04: out_length[7:0]   <= wdata;
+                    8'h05: out_length[15:8]  <= wdata;
                     default: begin
                         if (addr >= 8'h10 && addr <= 8'h2F) begin
-                            cs_data <= write_byte_32(cs_data, addr - 8'h10, wdata);
+                            cs_data  <= write_byte_32(cs_data,  addr[4:0], wdata);
                         end else if (addr >= 8'h30 && addr <= 8'h4F) begin
-                            msg_data <= write_byte_32(msg_data, addr - 8'h30, wdata);
+                            msg_data <= write_byte_32(msg_data, addr[4:0], wdata);
                         end
                     end
                 endcase
@@ -148,11 +137,11 @@ module register_file (
                     8'h81: rdata <= 8'hAC;
                     default: begin
                         if (addr >= 8'h10 && addr <= 8'h2F)
-                            rdata <= read_byte_32(cs_data, addr - 8'h10);
+                            rdata <= read_byte_32(cs_data,  addr[4:0]);
                         else if (addr >= 8'h30 && addr <= 8'h4F)
-                            rdata <= read_byte_32(msg_data, addr - 8'h30);
+                            rdata <= read_byte_32(msg_data, addr[4:0]);
                         else if (addr >= 8'h50 && addr <= 8'h6F)
-                            rdata <= read_byte_result(result_latched, addr - 8'h50);
+                            rdata <= read_byte_32(result_latched, addr[4:0]);
                         else
                             rdata <= 8'h00;
                     end

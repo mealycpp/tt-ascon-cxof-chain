@@ -1,13 +1,12 @@
 /*
- * ASCON-CXOF top: glue between UART/protocol/register file and the CXOF engine.
+ * ASCON-CXOF top: wires together UART, protocol parser, register file,
+ * and the CXOF mode controller.
  *
- * Data flow:
- *   uart_rx -> uart_rx_inst -> protocol_parser -> register_file -> cxof_controller -> ascon_permutation
- *                                                        ^                                |
- *                                                        |                                v
- *                                                        +--- result_out <----------------+
- *   protocol_parser <- register_file <- result_out
- *   protocol_parser -> uart_tx_inst -> uart_tx
+ * Data flow on RX side:
+ *   uart_rx -> protocol_parser -> register_file -> cxof_controller
+ *
+ * Data flow on TX side:
+ *   cxof_controller -> register_file (result) -> protocol_parser -> uart_tx
  */
 
 `default_nettype none
@@ -26,8 +25,7 @@ module ascon_cxof_top (
 );
 
     // ----- parameters -----
-    // Baud-rate parameter: at 25 MHz core clock, 115200 baud gives divider ~217.
-    // 25_000_000 / 115200 = 217.01 (~0.16% error, well within UART tolerance)
+    // At 50 MHz core clock, 115200 baud gives divider 50_000_000 / 115200 = 434.0
     localparam BAUD_DIV = 16'd434;
 
     // ----- UART RX -> framing parser -----
@@ -46,10 +44,10 @@ module ascon_cxof_top (
 
     // ----- protocol parser <-> register file -----
     wire        rf_we;
+    wire        rf_re;
     wire [7:0]  rf_addr;
     wire [7:0]  rf_wdata;
     wire [7:0]  rf_rdata;
-    wire        rf_re;
     wire        cmd_start;
     wire        cmd_reset_engine;
     wire        parser_error;
@@ -63,55 +61,47 @@ module ascon_cxof_top (
         .clk            (clk),
         .rst_n          (rst_n),
 
-        // RX from UART
         .rx_byte        (rx_byte),
         .rx_valid       (rx_valid),
 
-        // TX to UART
         .tx_byte        (tx_byte),
         .tx_send        (tx_send),
         .tx_ready       (tx_ready),
 
-        // Register file interface
         .rf_we          (rf_we),
         .rf_re          (rf_re),
         .rf_addr        (rf_addr),
         .rf_wdata       (rf_wdata),
         .rf_rdata       (rf_rdata),
 
-        // Engine control signals
         .cmd_start      (cmd_start),
         .cmd_reset_eng  (cmd_reset_engine),
 
-        // Status
         .engine_busy    (busy),
         .engine_done    (done_irq),
         .protocol_error (parser_error),
         .state_dbg      (state_dbg)
     );
 
-    // ----- register file -----
-    // Holds: status, command, output length, customization string, message, result
-    wire [319:0] cs_data;       // customization string (up to 32 bytes = 256 bits)
+    // ----- register file (256-bit cs/msg buffers) -----
+    wire [255:0] cs_data;
     wire [7:0]   cs_length;
-    wire [319:0] msg_data;      // message input (up to 32 bytes = 256 bits)
+    wire [255:0] msg_data;
     wire [7:0]   msg_length;
-    wire [15:0]  out_length;    // requested output length in bytes
-    wire [255:0] result_data;   // 32 bytes of output (could expand if needed)
+    wire [15:0]  out_length;
+    wire [255:0] result_data;
     wire         result_valid;
 
     register_file u_rf (
         .clk            (clk),
         .rst_n          (rst_n),
 
-        // Parser-facing port
         .we             (rf_we),
         .re             (rf_re),
         .addr           (rf_addr),
         .wdata          (rf_wdata),
         .rdata          (rf_rdata),
 
-        // Engine-facing ports
         .cs_data        (cs_data),
         .cs_length      (cs_length),
         .msg_data       (msg_data),
@@ -120,7 +110,6 @@ module ascon_cxof_top (
         .result_data    (result_data),
         .result_valid   (result_valid),
 
-        // Status flags driven by engine
         .engine_busy    (busy),
         .engine_done    (done_irq),
         .engine_error   (parser_error)
@@ -131,22 +120,18 @@ module ascon_cxof_top (
         .clk            (clk),
         .rst_n          (rst_n),
 
-        // Control
         .start          (cmd_start),
         .reset_engine   (cmd_reset_engine),
 
-        // Inputs from register file
         .cs_data        (cs_data),
         .cs_length      (cs_length),
         .msg_data       (msg_data),
         .msg_length     (msg_length),
         .out_length     (out_length),
 
-        // Output to register file
         .result_data    (result_data),
         .result_valid   (result_valid),
 
-        // Status
         .busy           (busy),
         .done           (done_irq)
     );
@@ -171,6 +156,6 @@ module ascon_cxof_top (
         if (!rst_n) heartbeat_cnt <= 24'd0;
         else        heartbeat_cnt <= heartbeat_cnt + 24'd1;
     end
-    assign heartbeat = heartbeat_cnt[22];  // ~3 Hz at 25 MHz, visible blink
+    assign heartbeat = heartbeat_cnt[22];
 
 endmodule
