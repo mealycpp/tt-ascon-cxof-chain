@@ -1,6 +1,6 @@
 <testsuites name="results">
   <testsuite name="all" package="all">
-    <property name="random_seed" value="1778698564" />
-    <testcase name="test_all_kats" classname="test_controller" file="/home/hadedy/projects/tt-ascon-cxof/test/controller/test_controller.py" lineno="81" time="0.38767576217651367" sim_time_ns="22720.0" ratio_time="58605.67571324022" />
+    <property name="random_seed" value="1778710039" />
+    <testcase name="test_all_kats" classname="test_controller" file="/home/hadedy/projects/tt-ascon-cxof/test/controller/test_controller.py" lineno="81" time="0.3894073963165283" sim_time_ns="22720.0" ratio_time="58345.06538630852" />
   </testsuite>
 </testsuites>

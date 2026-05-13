@@ -163,6 +163,10 @@ module protocol_parser (
             cmd_reset_eng  <= 1'b0;
             protocol_error <= 1'b0;
             tx_running_crc <= 16'hFFFF;
+            for (i = 0; i < 64; i = i + 1) begin
+                payload[i]      <= 8'd0;
+                resp_payload[i] <= 8'd0;
+            end
         end else begin
             // pulse defaults
             rf_we          <= 1'b0;
@@ -320,6 +324,10 @@ module protocol_parser (
                     tx_idx         <= 7'd0;
                     tx_phase       <= 4'd0;
                     tx_running_crc <= 16'hFFFF;
+            for (i = 0; i < 64; i = i + 1) begin
+                payload[i]      <= 8'd0;
+                resp_payload[i] <= 8'd0;
+            end
                     state          <= S_SEND_RESP;
                 end
 
