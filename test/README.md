@@ -1,47 +1,63 @@
-# Sample testbench for a Tiny Tapeout project
+# Testbench
 
-This is a sample testbench for a Tiny Tapeout project. It uses [cocotb](https://docs.cocotb.org/en/stable/) to drive the DUT and check the outputs.
-See below to get started or for more information, check the [website](https://tinytapeout.com/hdl/testing/).
+Cocotb + Icarus Verilog. This is what the Tiny Tapeout CI runs and what you
+run locally for fast iteration.
 
-## Setting up
+## Setup
 
-1. Edit [Makefile](Makefile) and modify `PROJECT_SOURCES` to point to your Verilog files.
-2. Edit [tb.v](tb.v) and replace `tt_um_example` with your module name.
-
-## How to run
-
-To run the RTL simulation:
-
-```sh
-make -B
+```bash
+sudo apt install iverilog gtkwave
+pip3 install cocotb pytest
 ```
 
-To run gatelevel simulation, first harden your project and copy `../runs/wokwi/results/final/verilog/gl/{your_module_name}.v` to `gate_level_netlist.v`.
+## Run
 
-Then run:
-
-```sh
-make -B GATES=yes
+```bash
+cd test
+make
 ```
 
-If you wish to save the waveform in VCD format instead of FST format, edit tb.v to use `$dumpfile("tb.vcd");` and then run:
+This builds the simulation, runs all tests in `test.py`, and writes `tb.vcd`.
 
-```sh
-make -B FST=
+## View waveforms
+
+```bash
+gtkwave tb.vcd
 ```
 
-This will generate `tb.vcd` instead of `tb.fst`.
+## Tests in test.py
 
-## How to view the waveform file
+- `test_ping`: chip responds to PING command (sanity check)
+- `test_get_version`: chip returns version byte and chip ID
+- `test_write_read_register`: write a register, read it back
+- `test_minimal_cxof`: load a small input, START the CXOF engine, poll until done
 
-Using GTKWave
+## What's NOT tested yet (TODO before silicon)
 
-```sh
-gtkwave tb.fst tb.gtkw
-```
+- **KAT validation against the NIST SP 800-232 reference vectors.** The CXOF
+  output must match the reference Python implementation. The current chip
+  uses placeholder values for the IV and domain separator that need to be
+  verified against the spec. See `golden/` for the reference.
 
-Using Surfer
+- **Edge cases**: cs_length=0 with msg_length>0, msg_length=0 with cs_length>0,
+  out_length > 32 (should saturate at 32 in this implementation), padding
+  edge cases when message is exact multiple of 8 bytes.
 
-```sh
-surfer tb.fst
-```
+- **Protocol robustness**: malformed frames, CRC errors, unknown commands,
+  oversized payloads — all should return error status without locking up.
+
+For tomorrow's tape-out, the priority order is:
+1. `test_ping` and `test_write_read_register` must pass (basic protocol)
+2. `test_minimal_cxof` must not lock up (engine completes)
+3. KAT validation can be deferred to a future shuttle if needed —
+   first silicon proves the architecture; second silicon fixes any
+   crypto-correctness bugs found in post-silicon testing.
+
+## Debugging tips
+
+If a test hangs, the most likely cause is:
+- UART baud divisor mismatch (check BAUD_DIV in info.yaml, ascon_cxof_top.v,
+  and test.py all agree)
+- CRC mismatch between RTL and Python reference (test_crc16_ccitt.py can
+  cross-check)
+- FSM stuck in a state — open tb.vcd in GTKWave and trace the FSM signals
