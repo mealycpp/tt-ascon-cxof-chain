@@ -1,4 +1,4 @@
-# tt_um_ascon_cxof
+# tt_um_ascon_cxof_chain
 
 **ASCON-CXOF hash chain accelerator** for Tiny Tapeout SKY130 shuttle.
 ChipFoundry CI2605 MPW.
@@ -15,7 +15,7 @@ cryptographic workloads on flight controllers and embedded systems.
 ├── README.md                # this file
 ├── docs/info.md             # chip description rendered by Tiny Tapeout
 ├── src/                     # RTL — what gets synthesized to silicon
-│   ├── project.v            # Tiny Tapeout wrapper (tt_um_ascon_cxof)
+│   ├── project.v            # Tiny Tapeout wrapper (tt_um_ascon_cxof_chain)
 │   ├── ascon_cxof_top.v     # main top — wires subblocks together
 │   ├── ascon_round.v        # single ASCON-p round (combinational)
 │   ├── ascon_permutation.v  # multi-round permutation engine

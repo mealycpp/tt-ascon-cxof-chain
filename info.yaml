@@ -2,10 +2,10 @@
 yaml_version: 6
 
 project:
-  title:        "ASCON-CXOF Hash Chain Accelerator"
+  title:        "ASCON-CXOF128 Hash-Chain Accelerator"
   author:       "Dr. Mohamed El-Hadedy"
   discord:      ""
-  description:  "ASCON-CXOF customizable extendable-output function hardware accelerator with UART-framed protocol. Implements NIST SP 800-232 ASCON-CXOF128 as a building block for post-quantum cryptographic workloads."
+  description:  "ASCON-CXOF128 (NIST SP 800-232) hardware accelerator with hash-chain wrapper for iterative hashing in hash-based signature schemes (SLH-DSA, LMS, XMSS). UART-framed protocol with single-shot and n-iteration chain modes."
   language:     "Verilog"
   clock_hz:     50000000
 
@@ -14,7 +14,7 @@ project:
   tiles: "8x2"
 
   # Top module name (must start with tt_um_)
-  top_module:  "tt_um_ascon_cxof"
+  top_module:  "tt_um_ascon_cxof_chain"
 
   # Source files (must be in ./src, listed one per line)
   source_files:

@@ -29,7 +29,7 @@ module tb ();
     // initialize uio inputs
     initial uio_in = 8'h00;
 
-    tt_um_ascon_cxof dut (
+    tt_um_ascon_cxof_chain dut (
         .ui_in  (ui_in),
         .uo_out (uo_out),
         .uio_in (uio_in),
