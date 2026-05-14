@@ -11,7 +11,7 @@ project:
 
   # 2x2 tiles - design contains a 320-bit ASCON state, protocol parser
   # with byte buffer, register file, full UART, and 12-round permutation.
-  tiles: "6x2"
+  tiles: "8x2"
 
   # Top module name (must start with tt_um_)
   top_module:  "tt_um_ascon_cxof"
