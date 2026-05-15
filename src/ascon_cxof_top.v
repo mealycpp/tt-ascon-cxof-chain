@@ -89,8 +89,110 @@ module ascon_cxof_top (
     wire [255:0] msg_data;
     wire [7:0]   msg_length;
     wire [15:0]  out_length;
+    wire         chain_enable;
+    wire [15:0]  chain_count;
+
     wire [255:0] result_data;
     wire         result_valid;
+
+    // ----- Software-controlled chain wrapper -----
+    // chain_enable=0:
+    //   one normal ASCON-CXOF(cs,msg) pass.
+    //
+    // chain_enable=1:
+    //   run chain_count passes.
+    //   pass 0 uses software msg.
+    //   pass 1..N use previous 32-byte digest as msg.
+    //
+    // chain_count=0 is treated as 1.
+    wire [255:0] core_result_data;
+    wire         core_result_valid;
+    wire         core_busy;
+    wire         core_done;
+
+    reg  [1:0]   chain_state;
+    reg  [15:0]  passes_left;
+    reg          use_feedback;
+    reg  [255:0] chain_feedback_msg;
+    reg          core_start;
+    reg          final_result_valid;
+
+    localparam [1:0] CH_IDLE      = 2'd0;
+    localparam [1:0] CH_CORE      = 2'd1;
+    localparam [1:0] CH_PREP_NEXT = 2'd2;
+
+    wire [15:0] requested_passes =
+        (chain_enable && (chain_count != 16'd0)) ? chain_count : 16'd1;
+
+    wire [255:0] msg_data_to_eng =
+        use_feedback ? chain_feedback_msg : msg_data;
+
+    wire [7:0] msg_length_to_eng =
+        use_feedback ? 8'd32 : msg_length;
+
+    assign result_data  = core_result_data;
+    assign result_valid = final_result_valid;
+
+    assign done_irq = final_result_valid;
+    assign busy     = (chain_state != CH_IDLE) | core_busy;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            chain_state        <= CH_IDLE;
+            passes_left        <= 16'd0;
+            use_feedback       <= 1'b0;
+            chain_feedback_msg <= 256'd0;
+            core_start         <= 1'b0;
+            final_result_valid <= 1'b0;
+        end else begin
+            core_start         <= 1'b0;
+            final_result_valid <= 1'b0;
+
+            if (cmd_reset_engine) begin
+                chain_state        <= CH_IDLE;
+                passes_left        <= 16'd0;
+                use_feedback       <= 1'b0;
+                chain_feedback_msg <= 256'd0;
+            end else begin
+                case (chain_state)
+                    CH_IDLE: begin
+                        if (cmd_start) begin
+                            passes_left  <= requested_passes;
+                            use_feedback <= 1'b0;
+                            core_start   <= 1'b1;
+                            chain_state  <= CH_CORE;
+                        end
+                    end
+
+                    CH_CORE: begin
+                        if (core_result_valid) begin
+                            chain_feedback_msg <= core_result_data;
+
+                            if (passes_left <= 16'd1) begin
+                                chain_state        <= CH_IDLE;
+                                passes_left        <= 16'd0;
+                                use_feedback       <= 1'b0;
+                                final_result_valid <= 1'b1;
+                            end else begin
+                                passes_left  <= passes_left - 16'd1;
+                                use_feedback <= 1'b1;
+                                chain_state  <= CH_PREP_NEXT;
+                            end
+                        end
+                    end
+
+                    CH_PREP_NEXT: begin
+                        core_start  <= 1'b1;
+                        chain_state <= CH_CORE;
+                    end
+
+                    default: begin
+                        chain_state <= CH_IDLE;
+                    end
+                endcase
+            end
+        end
+    end
 
     register_file u_rf (
         .clk            (clk),
@@ -107,6 +209,8 @@ module ascon_cxof_top (
         .msg_data       (msg_data),
         .msg_length     (msg_length),
         .out_length     (out_length),
+        .chain_enable   (chain_enable),
+        .chain_count    (chain_count),
         .result_data    (result_data),
         .result_valid   (result_valid),
 
@@ -120,20 +224,20 @@ module ascon_cxof_top (
         .clk            (clk),
         .rst_n          (rst_n),
 
-        .start          (cmd_start),
+        .start          (core_start),
         .reset_engine   (cmd_reset_engine),
 
         .cs_data        (cs_data),
         .cs_length      (cs_length),
-        .msg_data       (msg_data),
-        .msg_length     (msg_length),
+        .msg_data       (msg_data_to_eng),
+        .msg_length     (msg_length_to_eng),
         .out_length     (out_length),
 
-        .result_data    (result_data),
-        .result_valid   (result_valid),
+        .result_data    (core_result_data),
+        .result_valid   (core_result_valid),
 
-        .busy           (busy),
-        .done           (done_irq)
+        .busy           (core_busy),
+        .done           (core_done)
     );
 
     // ----- error aggregator -----

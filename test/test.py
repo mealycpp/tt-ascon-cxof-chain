@@ -361,3 +361,261 @@ async def test_uart_kat_007(dut):
 async def test_uart_kat_008(dut):
     await _setup(dut)
     await run_uart_kat(dut, KATS[7])
+
+# ============================================================
+# Software reference ASCON-CXOF + UART chain tests
+# ============================================================
+
+MASK64 = (1 << 64) - 1
+ASCON_CXOF128_IV = 0x0000080000CC0004
+ASCON_RC = [
+    0xF0, 0xE1, 0xD2, 0xC3,
+    0xB4, 0xA5, 0x96, 0x87,
+    0x78, 0x69, 0x5A, 0x4B,
+]
+
+REG_CHAIN_CTRL     = 0x06
+REG_CHAIN_COUNT_LO = 0x07
+REG_CHAIN_COUNT_HI = 0x08
+
+
+def _rotr64(x, n):
+    return ((x >> n) | ((x << (64 - n)) & MASK64)) & MASK64
+
+
+def _ascon_p12(state):
+    x0, x1, x2, x3, x4 = state
+
+    for rc in ASCON_RC:
+        # pC
+        x2 ^= rc
+
+        # pS
+        x0 ^= x4
+        x4 ^= x3
+        x2 ^= x1
+
+        t0 = (~x0) & x1
+        t1 = (~x1) & x2
+        t2 = (~x2) & x3
+        t3 = (~x3) & x4
+        t4 = (~x4) & x0
+
+        t0 &= MASK64
+        t1 &= MASK64
+        t2 &= MASK64
+        t3 &= MASK64
+        t4 &= MASK64
+
+        x0 ^= t1
+        x1 ^= t2
+        x2 ^= t3
+        x3 ^= t4
+        x4 ^= t0
+
+        x1 ^= x0
+        x0 ^= x4
+        x3 ^= x2
+        x2 = (~x2) & MASK64
+
+        # pL
+        x0 ^= _rotr64(x0, 19) ^ _rotr64(x0, 28)
+        x1 ^= _rotr64(x1, 61) ^ _rotr64(x1, 39)
+        x2 ^= _rotr64(x2, 1)  ^ _rotr64(x2, 6)
+        x3 ^= _rotr64(x3, 10) ^ _rotr64(x3, 17)
+        x4 ^= _rotr64(x4, 7)  ^ _rotr64(x4, 41)
+
+        x0 &= MASK64
+        x1 &= MASK64
+        x2 &= MASK64
+        x3 &= MASK64
+        x4 &= MASK64
+
+    return [x0, x1, x2, x3, x4]
+
+
+def _load_le(data):
+    return int.from_bytes(data, "little")
+
+
+def _pad(i):
+    return 1 << (8 * i)
+
+
+def sw_ascon_cxof(cs: bytes, msg: bytes, out_len: int = 32) -> bytes:
+    """Software reference matching the RTL byte order."""
+    state = [ASCON_CXOF128_IV, 0, 0, 0, 0]
+
+    # init permutation
+    state = _ascon_p12(state)
+
+    # customization-string bit length
+    state[0] ^= len(cs) * 8
+    state = _ascon_p12(state)
+
+    # absorb CS
+    off = 0
+    rem = len(cs)
+    while rem >= 8:
+        state[0] ^= _load_le(cs[off:off + 8])
+        state = _ascon_p12(state)
+        off += 8
+        rem -= 8
+
+    state[0] ^= _load_le(cs[off:off + rem]) ^ _pad(rem)
+    state = _ascon_p12(state)
+
+    # absorb MSG
+    off = 0
+    rem = len(msg)
+    while rem >= 8:
+        state[0] ^= _load_le(msg[off:off + 8])
+        state = _ascon_p12(state)
+        off += 8
+        rem -= 8
+
+    state[0] ^= _load_le(msg[off:off + rem]) ^ _pad(rem)
+    state = _ascon_p12(state)
+
+    # squeeze
+    out = bytearray()
+    remaining = out_len
+
+    while remaining > 0:
+        take = min(8, remaining)
+        out += state[0].to_bytes(8, "little")[:take]
+        remaining -= take
+        if remaining > 0:
+            state = _ascon_p12(state)
+
+    return bytes(out)
+
+
+def sw_chain_cxof(cs: bytes, msg: bytes, chain_count: int, out_len: int = 32) -> bytes:
+    """Reference for hardware chain mode.
+
+    count=1:
+        H0 = CXOF(cs, msg)
+
+    count=3:
+        H0 = CXOF(cs, msg)
+        H1 = CXOF(cs, H0)
+        H2 = CXOF(cs, H1)
+    """
+    if chain_count <= 0:
+        chain_count = 1
+
+    digest = sw_ascon_cxof(cs, msg, out_len)
+
+    for _ in range(1, chain_count):
+        digest = sw_ascon_cxof(cs, digest, out_len)
+
+    return digest
+
+
+async def run_uart_chain_case(dut, cs: bytes, msg: bytes, chain_count: int):
+    assert len(cs) <= 32
+    assert len(msg) <= 32
+    assert 0 <= chain_count <= 0xFFFF
+
+    dut._log.info(
+        f"=== UART CHAIN TEST: cs_len={len(cs)} msg_len={len(msg)} chain_count={chain_count} ==="
+    )
+
+    expected = sw_chain_cxof(cs, msg, chain_count, 32)
+
+    # Load CS bytes
+    for i, b in enumerate(cs):
+        await write_reg(dut, REG_CS_BASE + i, b)
+
+    # Load MSG bytes
+    for i, b in enumerate(msg):
+        await write_reg(dut, REG_MSG_BASE + i, b)
+
+    # Set lengths
+    await write_reg(dut, REG_CS_LENGTH, len(cs))
+    await write_reg(dut, REG_MSG_LENGTH, len(msg))
+    await write_reg(dut, REG_OUT_LEN_LO, 32 & 0xFF)
+    await write_reg(dut, REG_OUT_LEN_HI, (32 >> 8) & 0xFF)
+
+    # Enable chain mode and send count through UART registers
+    await write_reg(dut, REG_CHAIN_CTRL, 0x01)
+    await write_reg(dut, REG_CHAIN_COUNT_LO, chain_count & 0xFF)
+    await write_reg(dut, REG_CHAIN_COUNT_HI, (chain_count >> 8) & 0xFF)
+
+    # Start
+    s, _ = await send_and_recv(dut, build_frame(CMD_START))
+    assert s == ST_OK, f"START returned 0x{s:02x}"
+
+    # Poll result_present bit
+    for poll in range(400):
+        status = await read_reg(dut, REG_STATUS)
+        if status & 0x08:
+            break
+    else:
+        raise TimeoutError("result_present never asserted in chain test")
+
+    got = bytes([await read_reg(dut, REG_OUT_BASE + i) for i in range(32)])
+
+    dut._log.info(f"chain_count={chain_count}")
+    dut._log.info(f"  got:  {got.hex().upper()}")
+    dut._log.info(f"  want: {expected.hex().upper()}")
+
+    assert got == expected, f"CHAIN mismatch for chain_count={chain_count}"
+
+
+@cocotb.test()
+async def test_software_reference_matches_existing_kats(dut):
+    """First prove Python reference matches existing one-shot KATs."""
+    await _setup(dut)
+
+    for kat in KATS:
+        got = sw_ascon_cxof(kat["cs"], kat["msg"], 32)
+        assert got == kat["expected"], f"software reference mismatch: {kat['name']}"
+
+    dut._log.info("Software ASCON-CXOF reference matches all existing KATs")
+
+
+@cocotb.test()
+async def test_uart_chain_count_1_matches_normal_cxof(dut):
+    """chain_enable=1, chain_count=1 should equal normal CXOF(cs,msg)."""
+    await _setup(dut)
+
+    cs = bytes([0x10, 0x11, 0x12, 0x13])
+    msg = bytes([0x00, 0x01, 0x02, 0x03, 0x04])
+
+    await run_uart_chain_case(dut, cs, msg, 1)
+
+
+@cocotb.test()
+async def test_uart_chain_count_2(dut):
+    """Hardware must match software H1 = CXOF(cs, CXOF(cs,msg))."""
+    await _setup(dut)
+
+    cs = bytes([0x10, 0x11, 0x12, 0x13])
+    msg = bytes([0x00, 0x01, 0x02, 0x03, 0x04])
+
+    await run_uart_chain_case(dut, cs, msg, 2)
+
+
+@cocotb.test()
+async def test_uart_chain_count_3(dut):
+    """Hardware must match software 3-pass chained CXOF."""
+    await _setup(dut)
+
+    cs = bytes(range(0x10, 0x18))
+    msg = bytes(range(0x00, 0x0A))
+
+    await run_uart_chain_case(dut, cs, msg, 3)
+
+
+@cocotb.test()
+async def test_uart_chain_count_5(dut):
+    """Hardware must match software 5-pass chained CXOF."""
+    await _setup(dut)
+
+    cs = bytes(range(0x10, 0x20))
+    msg = bytes([0xA5, 0x5A, 0x01, 0x02, 0x03, 0x04])
+
+    await run_uart_chain_case(dut, cs, msg, 5)
+

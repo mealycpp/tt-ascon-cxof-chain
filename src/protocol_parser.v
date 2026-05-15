@@ -307,7 +307,7 @@ module protocol_parser (
                             rf_addr  <= 8'h00;   // STATUS register
                             rf_re    <= 1'b1;
                             resp_len <= 7'd1;
-                            state    <= S_BUILD_RESP;
+                            state    <= S_WAIT_RF_READ;
                         end
                         default: begin
                             resp_status <= ST_BAD_CMD;

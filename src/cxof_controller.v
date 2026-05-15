@@ -170,10 +170,12 @@ module cxof_controller (
             state         <= S_IDLE;
             busy          <= 1'b0;
             done          <= 1'b0;
+            result_valid  <= 1'b0;
             perm_start    <= 1'b0;
         end else begin
-            perm_start <= 1'b0;
-            done       <= 1'b0;
+            perm_start   <= 1'b0;
+            done         <= 1'b0;
+            result_valid <= 1'b0;
 
             case (state)
 

@@ -41,6 +41,8 @@ module register_file (
     output reg  [255:0] msg_data,
     output reg  [7:0]   msg_length,
     output reg  [15:0]  out_length,
+    output reg          chain_enable,
+    output reg  [15:0]  chain_count,
 
     // Engine result inputs
     input  wire [255:0] result_data,
@@ -52,16 +54,23 @@ module register_file (
     input  wire         engine_error
 );
 
-    // Cached result snapshot - latched on engine result_valid pulse
+    // Cached result snapshot - latched on final engine result_valid pulse.
+    // Clear result_present when a new run begins so software never reads stale output.
     reg [255:0] result_latched;
     reg         result_present;
+    reg         engine_busy_d;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             result_latched <= 256'd0;
             result_present <= 1'b0;
+            engine_busy_d  <= 1'b0;
         end else begin
-            if (result_valid) begin
+            engine_busy_d <= engine_busy;
+
+            if (engine_busy && !engine_busy_d) begin
+                result_present <= 1'b0;
+            end else if (result_valid) begin
                 result_latched <= result_data;
                 result_present <= 1'b1;
             end
@@ -98,12 +107,14 @@ module register_file (
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            cs_data    <= 256'd0;
-            cs_length  <= 8'd0;
-            msg_data   <= 256'd0;
-            msg_length <= 8'd0;
-            out_length <= 16'd0;
-            rdata      <= 8'd0;
+            cs_data      <= 256'd0;
+            cs_length    <= 8'd0;
+            msg_data     <= 256'd0;
+            msg_length   <= 8'd0;
+            out_length   <= 16'd0;
+            chain_enable <= 1'b0;
+            chain_count  <= 16'd1;
+            rdata        <= 8'd0;
         end else begin
             // ---- writes ----
             if (we) begin
@@ -115,6 +126,9 @@ module register_file (
                     8'h03: msg_length        <= wdata;
                     8'h04: out_length[7:0]   <= wdata;
                     8'h05: out_length[15:8]  <= wdata;
+                    8'h06: chain_enable      <= wdata[0];
+                    8'h07: chain_count[7:0]  <= wdata;
+                    8'h08: chain_count[15:8] <= wdata;
                     default: begin
                         if (addr >= 8'h10 && addr <= 8'h2F) begin
                             cs_data  <= write_byte_32(cs_data,  (addr - 8'h10), wdata);
@@ -133,6 +147,9 @@ module register_file (
                     8'h03: rdata <= msg_length;
                     8'h04: rdata <= out_length[7:0];
                     8'h05: rdata <= out_length[15:8];
+                    8'h06: rdata <= {7'd0, chain_enable};
+                    8'h07: rdata <= chain_count[7:0];
+                    8'h08: rdata <= chain_count[15:8];
                     8'h80: rdata <= 8'h01;
                     8'h81: rdata <= 8'hAC;
                     default: begin
