@@ -619,3 +619,14 @@ async def test_uart_chain_count_5(dut):
 
     await run_uart_chain_case(dut, cs, msg, 5)
 
+
+@cocotb.test()
+async def test_uart_chain_count_20(dut):
+    """Hardware must match software 20-pass chained CXOF."""
+    await _setup(dut)
+
+    cs = bytes(range(0x10, 0x20))
+    msg = bytes([0xA5, 0x5A, 0x01, 0x02, 0x03, 0x04])
+
+    await run_uart_chain_case(dut, cs, msg, 20)
+
