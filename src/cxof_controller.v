@@ -44,6 +44,8 @@ module cxof_controller (
     input  wire [255:0] msg_data,
     input  wire [7:0]   msg_length,
     input  wire [15:0]  out_length,
+    input  wire         chain_enable,
+    input  wire [15:0]  chain_count,
 
     // Output
     output reg  [255:0] result_data,
@@ -148,6 +150,17 @@ module cxof_controller (
     reg [7:0]   msg_remaining;
     reg [15:0]  out_remaining;
     reg [4:0]   squeeze_idx;
+    reg [15:0]  passes_left;
+
+    wire [15:0] requested_passes =
+        (chain_enable && (chain_count != 16'd0)) ? chain_count : 16'd1;
+
+    wire [15:0] effective_out_length =
+        (out_length > 16'd32) ? 16'd32 : out_length;
+
+    // In chain mode, every pass produces a full 32-byte digest.
+    wire [15:0] chain_pass_out_length =
+        chain_enable ? 16'd32 : effective_out_length;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -159,6 +172,7 @@ module cxof_controller (
             msg_remaining <= 8'd0;
             out_remaining <= 16'd0;
             squeeze_idx   <= 5'd0;
+            passes_left   <= 16'd0;
             result_data   <= 256'd0;
             result_valid  <= 1'b0;
             busy          <= 1'b0;
@@ -171,6 +185,7 @@ module cxof_controller (
             busy          <= 1'b0;
             done          <= 1'b0;
             result_valid  <= 1'b0;
+            passes_left   <= 16'd0;
             perm_start    <= 1'b0;
         end else begin
             perm_start   <= 1'b0;
@@ -187,8 +202,9 @@ module cxof_controller (
                         msg_shift     <= msg_data;
                         cs_remaining  <= cs_length;
                         msg_remaining <= msg_length;
-                        out_remaining <= (out_length > 16'd32) ? 16'd32 : out_length;
+                        out_remaining <= chain_pass_out_length;
                         squeeze_idx   <= 5'd0;
+                        passes_left   <= requested_passes;
                         result_valid  <= 1'b0;
                         result_data   <= 256'd0;
                         busy          <= 1'b1;
@@ -320,10 +336,28 @@ module cxof_controller (
                 end
 
                 S_FINISH: begin
-                    result_valid <= 1'b1;
-                    busy         <= 1'b0;
-                    done         <= 1'b1;
-                    state        <= S_IDLE;
+                    if (passes_left > 16'd1) begin
+                        // Internal chained mode:
+                        // previous 32-byte digest becomes the next message.
+                        // This avoids a top-level 256-bit feedback register/mux.
+                        passes_left   <= passes_left - 16'd1;
+                        cxof_state    <= {256'd0, CXOF128_IV};
+                        cs_shift      <= cs_data;
+                        msg_shift     <= result_data;
+                        cs_remaining  <= cs_length;
+                        msg_remaining <= 8'd32;
+                        out_remaining <= 16'd32;
+                        squeeze_idx   <= 5'd0;
+                        result_data   <= 256'd0;
+                        busy          <= 1'b1;
+                        done          <= 1'b0;
+                        state         <= S_INIT_KICK;
+                    end else begin
+                        result_valid <= 1'b1;
+                        busy         <= 1'b0;
+                        done         <= 1'b1;
+                        state        <= S_IDLE;
+                    end
                 end
 
                 default: state <= S_IDLE;
