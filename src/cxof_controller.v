@@ -197,7 +197,7 @@ module cxof_controller (
                 S_IDLE: begin
                     busy <= 1'b0;
                     if (start) begin
-                        cxof_state    <= {256'd0, CXOF128_IV};
+                        // cxof_state IV injection is done in S_INIT_KICK.
                         cs_shift      <= cs_data;
                         msg_shift     <= msg_data;
                         cs_remaining  <= cs_length;
@@ -213,7 +213,9 @@ module cxof_controller (
                 end
 
                 S_INIT_KICK: begin
-                    perm_state_in <= cxof_state;
+                    // Inject IV directly. This removes the S_FINISH -> cxof_state
+                    // wide mux path that broke 50 MHz at slow-slow corners.
+                    perm_state_in <= {256'd0, CXOF128_IV};
                     perm_rounds   <= 4'd12;
                     perm_start    <= 1'b1;
                     state         <= S_INIT_WAIT;
@@ -227,7 +229,7 @@ module cxof_controller (
 
                 S_LEN_KICK: begin
                     perm_state_in <= {cxof_state[319:64],
-                                      cxof_state[63:0] ^ {52'd0, cs_remaining, 3'b000}};
+                                      cxof_state[63:0] ^ {53'd0, cs_remaining, 3'b000}};
                     perm_rounds   <= 4'd12;
                     perm_start    <= 1'b1;
                     state         <= S_LEN_WAIT;
@@ -341,7 +343,8 @@ module cxof_controller (
                         // previous 32-byte digest becomes the next message.
                         // This avoids a top-level 256-bit feedback register/mux.
                         passes_left   <= passes_left - 16'd1;
-                        cxof_state    <= {256'd0, CXOF128_IV};
+                        // cxof_state IV injection is done in S_INIT_KICK.
+                        // Do not drive the 320-bit cxof_state mux from S_FINISH.
                         cs_shift      <= cs_data;
                         msg_shift     <= result_data;
                         cs_remaining  <= cs_length;
