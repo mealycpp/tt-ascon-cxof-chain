@@ -50,24 +50,42 @@ module stream_register_file (
     reg [4:0] result_wr_idx;
 
     reg [63:0] word_mux;
-    wire [4:0] word_base = {in_word_index[1:0], 3'b000};
 
     integer i;
-    integer j;
 
     assign in_word        = word_mux;
     assign in_word_valid  = in_word_ready;
     assign stream_out_ready = 1'b1;
 
-    wire _unused = &{in_word_bytes, 1'b0};
+    wire _unused = &{in_word_bytes, in_word_index[2], 1'b0};
 
     always @* begin
         word_mux = 64'd0;
-        for (j = 0; j < 8; j = j + 1) begin
-            if (in_word_kind)
-                word_mux[(8*j) +: 8] = msg_mem[word_base + j];
-            else
-                word_mux[(8*j) +: 8] = cs_mem[word_base + j];
+
+        if (in_word_kind) begin
+            case (in_word_index[1:0])
+                2'd0: word_mux = {msg_mem[7],  msg_mem[6],  msg_mem[5],  msg_mem[4],
+                                  msg_mem[3],  msg_mem[2],  msg_mem[1],  msg_mem[0]};
+                2'd1: word_mux = {msg_mem[15], msg_mem[14], msg_mem[13], msg_mem[12],
+                                  msg_mem[11], msg_mem[10], msg_mem[9],  msg_mem[8]};
+                2'd2: word_mux = {msg_mem[23], msg_mem[22], msg_mem[21], msg_mem[20],
+                                  msg_mem[19], msg_mem[18], msg_mem[17], msg_mem[16]};
+                2'd3: word_mux = {msg_mem[31], msg_mem[30], msg_mem[29], msg_mem[28],
+                                  msg_mem[27], msg_mem[26], msg_mem[25], msg_mem[24]};
+                default: word_mux = 64'd0;
+            endcase
+        end else begin
+            case (in_word_index[1:0])
+                2'd0: word_mux = {cs_mem[7],  cs_mem[6],  cs_mem[5],  cs_mem[4],
+                                  cs_mem[3],  cs_mem[2],  cs_mem[1],  cs_mem[0]};
+                2'd1: word_mux = {cs_mem[15], cs_mem[14], cs_mem[13], cs_mem[12],
+                                  cs_mem[11], cs_mem[10], cs_mem[9],  cs_mem[8]};
+                2'd2: word_mux = {cs_mem[23], cs_mem[22], cs_mem[21], cs_mem[20],
+                                  cs_mem[19], cs_mem[18], cs_mem[17], cs_mem[16]};
+                2'd3: word_mux = {cs_mem[31], cs_mem[30], cs_mem[29], cs_mem[28],
+                                  cs_mem[27], cs_mem[26], cs_mem[25], cs_mem[24]};
+                default: word_mux = 64'd0;
+            endcase
         end
     end
 

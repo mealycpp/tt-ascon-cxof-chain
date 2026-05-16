@@ -66,15 +66,15 @@ module cxof_stream_controller (
     function [63:0] pad_val;
         input [3:0] i;
         begin
-            case (i[2:0])
-                3'd0: pad_val = 64'h0000_0000_0000_0001;
-                3'd1: pad_val = 64'h0000_0000_0000_0100;
-                3'd2: pad_val = 64'h0000_0000_0001_0000;
-                3'd3: pad_val = 64'h0000_0000_0100_0000;
-                3'd4: pad_val = 64'h0000_0001_0000_0000;
-                3'd5: pad_val = 64'h0000_0100_0000_0000;
-                3'd6: pad_val = 64'h0001_0000_0000_0000;
-                3'd7: pad_val = 64'h0100_0000_0000_0000;
+            case (i)
+                4'd0: pad_val = 64'h0000_0000_0000_0001;
+                4'd1: pad_val = 64'h0000_0000_0000_0100;
+                4'd2: pad_val = 64'h0000_0000_0001_0000;
+                4'd3: pad_val = 64'h0000_0000_0100_0000;
+                4'd4: pad_val = 64'h0000_0001_0000_0000;
+                4'd5: pad_val = 64'h0000_0100_0000_0000;
+                4'd6: pad_val = 64'h0001_0000_0000_0000;
+                4'd7: pad_val = 64'h0100_0000_0000_0000;
                 default: pad_val = 64'd0;
             endcase
         end
@@ -83,15 +83,15 @@ module cxof_stream_controller (
     function [63:0] mask_n;
         input [3:0] n;
         begin
-            case (n[2:0])
-                3'd0: mask_n = 64'h0000_0000_0000_0000;
-                3'd1: mask_n = 64'h0000_0000_0000_00FF;
-                3'd2: mask_n = 64'h0000_0000_0000_FFFF;
-                3'd3: mask_n = 64'h0000_0000_00FF_FFFF;
-                3'd4: mask_n = 64'h0000_0000_FFFF_FFFF;
-                3'd5: mask_n = 64'h0000_00FF_FFFF_FFFF;
-                3'd6: mask_n = 64'h0000_FFFF_FFFF_FFFF;
-                3'd7: mask_n = 64'h00FF_FFFF_FFFF_FFFF;
+            case (n)
+                4'd0: mask_n = 64'h0000_0000_0000_0000;
+                4'd1: mask_n = 64'h0000_0000_0000_00FF;
+                4'd2: mask_n = 64'h0000_0000_0000_FFFF;
+                4'd3: mask_n = 64'h0000_0000_00FF_FFFF;
+                4'd4: mask_n = 64'h0000_0000_FFFF_FFFF;
+                4'd5: mask_n = 64'h0000_00FF_FFFF_FFFF;
+                4'd6: mask_n = 64'h0000_FFFF_FFFF_FFFF;
+                4'd7: mask_n = 64'h00FF_FFFF_FFFF_FFFF;
                 default: mask_n = 64'd0;
             endcase
         end
@@ -101,11 +101,11 @@ module cxof_stream_controller (
         input [255:0] data;
         input [2:0] idx;
         begin
-            case (idx[1:0])
-                2'd0: chain_word_at = data[63:0];
-                2'd1: chain_word_at = data[127:64];
-                2'd2: chain_word_at = data[191:128];
-                2'd3: chain_word_at = data[255:192];
+            case (idx)
+                3'd0: chain_word_at = data[63:0];
+                3'd1: chain_word_at = data[127:64];
+                3'd2: chain_word_at = data[191:128];
+                3'd3: chain_word_at = data[255:192];
                 default: chain_word_at = 64'd0;
             endcase
         end
