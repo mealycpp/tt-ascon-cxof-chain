@@ -17,6 +17,7 @@ module tb_stream ();
     reg          in_word_valid;
     wire         in_word_ready;
     wire         in_word_kind;
+    wire [2:0]   in_word_index;
     wire [3:0]   in_word_bytes;
 
     wire [7:0]   out_byte;
@@ -43,6 +44,7 @@ module tb_stream ();
         .in_word_valid (in_word_valid),
         .in_word_ready (in_word_ready),
         .in_word_kind  (in_word_kind),
+        .in_word_index (in_word_index),
         .in_word_bytes (in_word_bytes),
 
         .out_byte      (out_byte),

@@ -29,6 +29,7 @@ module cxof_stream_controller (
     input  wire        in_word_valid,
     output reg         in_word_ready,
     output reg         in_word_kind,   // 0 = CS, 1 = MSG
+    output reg  [2:0]  in_word_index,  // 64-bit word index: 0..3
     output reg  [3:0]  in_word_bytes,  // requested useful bytes, 1..8
 
     output reg  [7:0]  out_byte,
@@ -137,6 +138,7 @@ module cxof_stream_controller (
     reg [4:0]   state;
     reg [319:0] cxof_state;
     reg [63:0]  cur_word;
+    reg [2:0]   cs_word_idx;
 
     reg [7:0]   cs_remaining;
     reg [7:0]   msg_remaining;
@@ -167,6 +169,7 @@ module cxof_stream_controller (
             state            <= S_IDLE;
             cxof_state       <= 320'd0;
             cur_word         <= 64'd0;
+            cs_word_idx      <= 3'd0;
             cs_remaining     <= 8'd0;
             msg_remaining    <= 8'd0;
             msg_word_idx     <= 3'd0;
@@ -185,6 +188,7 @@ module cxof_stream_controller (
 
             in_word_ready    <= 1'b0;
             in_word_kind     <= 1'b0;
+            in_word_index    <= 3'd0;
             in_word_bytes    <= 4'd0;
 
             out_byte         <= 8'd0;
@@ -213,6 +217,7 @@ module cxof_stream_controller (
                     out_last  <= 1'b0;
                     if (start) begin
                         busy             <= 1'b1;
+                        cs_word_idx      <= 3'd0;
                         cs_remaining     <= cs_length;
                         msg_remaining    <= msg_length;
                         msg_word_idx     <= 3'd0;
@@ -263,6 +268,7 @@ module cxof_stream_controller (
                 S_REQ_CS_FULL: begin
                     in_word_ready <= 1'b1;
                     in_word_kind  <= 1'b0;
+                    in_word_index <= cs_word_idx;
                     in_word_bytes <= 4'd8;
                     if (in_word_valid) begin
                         cur_word      <= in_word;
@@ -282,6 +288,7 @@ module cxof_stream_controller (
                 S_CS_WAIT: begin
                     if (perm_done) begin
                         cxof_state   <= perm_state_out;
+                        cs_word_idx  <= cs_word_idx + 3'd1;
                         cs_remaining <= cs_remaining - 8'd8;
                         if ((cs_remaining - 8'd8) >= 8'd8)
                             state <= S_REQ_CS_FULL;
@@ -297,6 +304,7 @@ module cxof_stream_controller (
                 S_REQ_CS_FIN: begin
                     in_word_ready <= 1'b1;
                     in_word_kind  <= 1'b0;
+                    in_word_index <= cs_word_idx;
                     in_word_bytes <= {1'b0, cs_remaining[2:0]};
                     if (in_word_valid) begin
                         cur_word      <= in_word;
@@ -336,6 +344,7 @@ module cxof_stream_controller (
                     end else begin
                         in_word_ready <= 1'b1;
                         in_word_kind  <= 1'b1;
+                        in_word_index <= msg_word_idx;
                         in_word_bytes <= 4'd8;
                         if (in_word_valid) begin
                             cur_word      <= in_word;
@@ -376,6 +385,7 @@ module cxof_stream_controller (
                     end else begin
                         in_word_ready <= 1'b1;
                         in_word_kind  <= 1'b1;
+                        in_word_index <= msg_word_idx;
                         in_word_bytes <= {1'b0, msg_remaining[2:0]};
                         if (in_word_valid) begin
                             cur_word      <= in_word;
@@ -479,6 +489,7 @@ module cxof_stream_controller (
                 S_PASS_FINISH: begin
                     if (passes_left > 16'd1) begin
                         passes_left      <= passes_left - 16'd1;
+                        cs_word_idx      <= 3'd0;
                         cs_remaining     <= cs_length;
                         msg_remaining    <= 8'd32;
                         msg_word_idx     <= 3'd0;

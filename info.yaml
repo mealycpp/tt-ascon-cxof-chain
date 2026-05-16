@@ -23,6 +23,8 @@ project:
     - "ascon_permutation.v"
     - "ascon_round.v"
     - "cxof_controller.v"
+    - "cxof_stream_controller.v"
+    - "stream_register_file.v"
     - "uart_rx.v"
     - "uart_tx.v"
     - "baud_gen.v"

@@ -1,12 +1,9 @@
 /*
- * ASCON-CXOF top: wires together UART, protocol parser, register file,
- * and the CXOF mode controller.
+ * ASCON-CXOF top using stream-oriented wrapper.
  *
- * Data flow on RX side:
- *   uart_rx -> protocol_parser -> register_file -> cxof_controller
- *
- * Data flow on TX side:
- *   cxof_controller -> register_file (result) -> protocol_parser -> uart_tx
+ * UART/protocol interface stays compatible with the previous register map.
+ * Crypto path is now narrow:
+ *   register bytes -> 64-bit stream words -> CXOF -> output bytes -> result bytes
  */
 
 `default_nettype none
@@ -24,11 +21,8 @@ module ascon_cxof_top (
     output wire        rx_active
 );
 
-    // ----- parameters -----
-    // At 50 MHz core clock, 115200 baud gives divider 50_000_000 / 115200 = 434.0
     localparam BAUD_DIV = 16'd434;
 
-    // ----- UART RX -> framing parser -----
     wire [7:0] rx_byte;
     wire       rx_valid;
 
@@ -42,7 +36,6 @@ module ascon_cxof_top (
         .rx_active  (rx_active)
     );
 
-    // ----- protocol parser <-> register file -----
     wire        rf_we;
     wire        rf_re;
     wire [7:0]  rf_addr;
@@ -52,7 +45,6 @@ module ascon_cxof_top (
     wire        cmd_reset_engine;
     wire        parser_error;
 
-    // ----- TX side -----
     wire [7:0]  tx_byte;
     wire        tx_send;
     wire        tx_ready;
@@ -83,69 +75,88 @@ module ascon_cxof_top (
         .state_dbg      (state_dbg)
     );
 
-    // ----- register file (256-bit cs/msg buffers) -----
-    wire [255:0] cs_data;
-    wire [7:0]   cs_length;
-    wire [255:0] msg_data;
-    wire [7:0]   msg_length;
-    wire [15:0]  out_length;
-    wire         chain_enable;
-    wire [15:0]  chain_count;
-    wire [255:0] result_data;
-    wire         result_valid;
+    wire [7:0]  cs_length;
+    wire [7:0]  msg_length;
+    wire [15:0] out_length;
+    wire        chain_enable;
+    wire [15:0] chain_count;
 
-    register_file u_rf (
-        .clk            (clk),
-        .rst_n          (rst_n),
+    wire [63:0] stream_in_word;
+    wire        stream_in_valid;
+    wire        stream_in_ready;
+    wire        stream_in_kind;
+    wire [2:0]  stream_in_index;
+    wire [3:0]  stream_in_bytes;
 
-        .we             (rf_we),
-        .re             (rf_re),
-        .addr           (rf_addr),
-        .wdata          (rf_wdata),
-        .rdata          (rf_rdata),
+    wire [7:0]  stream_out_byte;
+    wire        stream_out_valid;
+    wire        stream_out_ready;
+    wire        stream_out_last;
 
-        .cs_data        (cs_data),
-        .cs_length      (cs_length),
-        .msg_data       (msg_data),
-        .msg_length     (msg_length),
-        .out_length     (out_length),
-        .chain_enable   (chain_enable),
-        .chain_count    (chain_count),
-        .result_data    (result_data),
-        .result_valid   (result_valid),
+    stream_register_file u_rf (
+        .clk              (clk),
+        .rst_n            (rst_n),
 
-        .engine_busy    (busy),
-        .engine_done    (done_irq),
-        .engine_error   (parser_error)
+        .we               (rf_we),
+        .re               (rf_re),
+        .addr             (rf_addr),
+        .wdata            (rf_wdata),
+        .rdata            (rf_rdata),
+
+        .cs_length        (cs_length),
+        .msg_length       (msg_length),
+        .out_length       (out_length),
+        .chain_enable     (chain_enable),
+        .chain_count      (chain_count),
+
+        .in_word          (stream_in_word),
+        .in_word_valid    (stream_in_valid),
+        .in_word_ready    (stream_in_ready),
+        .in_word_kind     (stream_in_kind),
+        .in_word_index    (stream_in_index),
+        .in_word_bytes    (stream_in_bytes),
+
+        .stream_out_byte  (stream_out_byte),
+        .stream_out_valid (stream_out_valid),
+        .stream_out_ready (stream_out_ready),
+        .stream_out_last  (stream_out_last),
+
+        .engine_busy      (busy),
+        .engine_done      (done_irq),
+        .engine_error     (parser_error)
     );
 
-    // ----- CXOF engine -----
-    cxof_controller u_cxof (
-        .clk            (clk),
-        .rst_n          (rst_n),
+    cxof_stream_controller u_cxof (
+        .clk           (clk),
+        .rst_n         (rst_n),
 
-        .start          (cmd_start),
-        .reset_engine   (cmd_reset_engine),
+        .start         (cmd_start),
+        .reset_engine  (cmd_reset_engine),
 
-        .cs_data        (cs_data),
-        .cs_length      (cs_length),
-        .msg_data       (msg_data),
-        .msg_length     (msg_length),
-        .out_length     (out_length),
-        .chain_enable   (chain_enable),
-        .chain_count    (chain_count),
+        .cs_length     (cs_length),
+        .msg_length    (msg_length),
+        .out_length    (out_length),
+        .chain_enable  (chain_enable),
+        .chain_count   (chain_count),
 
-        .result_data    (result_data),
-        .result_valid   (result_valid),
+        .in_word       (stream_in_word),
+        .in_word_valid (stream_in_valid),
+        .in_word_ready (stream_in_ready),
+        .in_word_kind  (stream_in_kind),
+        .in_word_index (stream_in_index),
+        .in_word_bytes (stream_in_bytes),
 
-        .busy           (busy),
-        .done           (done_irq)
+        .out_byte      (stream_out_byte),
+        .out_valid     (stream_out_valid),
+        .out_ready     (stream_out_ready),
+        .out_last      (stream_out_last),
+
+        .busy          (busy),
+        .done          (done_irq)
     );
 
-    // ----- error aggregator -----
     assign error = parser_error;
 
-    // ----- TX UART -----
     uart_tx u_uart_tx (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -156,12 +167,12 @@ module ascon_cxof_top (
         .tx         (uart_tx)
     );
 
-    // ----- heartbeat (visible activity indicator) -----
     reg [23:0] heartbeat_cnt;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) heartbeat_cnt <= 24'd0;
         else        heartbeat_cnt <= heartbeat_cnt + 24'd1;
     end
+
     assign heartbeat = heartbeat_cnt[22];
 
 endmodule
