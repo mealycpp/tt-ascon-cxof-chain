@@ -162,6 +162,10 @@ module cxof_controller (
     wire [15:0] chain_pass_out_length =
         chain_enable ? 16'd32 : effective_out_length;
 
+    // Used to stage the next message absorption input one cycle before S_MSG_KICK.
+    wire [7:0]  msg_remaining_after_block = msg_remaining - 8'd8;
+    wire [63:0] msg_next_word             = msg_shift[127:64];
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state         <= S_IDLE;
@@ -272,13 +276,26 @@ module cxof_controller (
                 S_CS_FIN_WAIT: begin
                     if (perm_done) begin
                         cxof_state <= perm_state_out;
-                        state      <= (msg_remaining >= 8'd8) ? S_MSG_KICK : S_MSG_FIN_KICK;
+
+                        // Stage message permutation input here, not in S_MSG_KICK.
+                        // This removes the critical state[9] -> perm_state_in wide mux path.
+                        if (msg_remaining >= 8'd8) begin
+                            perm_state_in <= {perm_state_out[319:64],
+                                              perm_state_out[63:0] ^ msg_shift[63:0]};
+                            state <= S_MSG_KICK;
+                        end else begin
+                            perm_state_in <= {perm_state_out[319:64],
+                                              perm_state_out[63:0]
+                                              ^ (msg_shift[63:0] & mask_n(msg_remaining[3:0]))
+                                              ^ pad_val(msg_remaining[3:0])};
+                            state <= S_MSG_FIN_KICK;
+                        end
                     end
                 end
 
                 S_MSG_KICK: begin
-                    perm_state_in <= {cxof_state[319:64],
-                                      cxof_state[63:0] ^ msg_shift[63:0]};
+                    // perm_state_in was staged in the previous WAIT state.
+                    // Keep this state narrow: only launch the permutation.
                     perm_rounds   <= 4'd12;
                     perm_start    <= 1'b1;
                     state         <= S_MSG_WAIT;
@@ -287,19 +304,25 @@ module cxof_controller (
                     if (perm_done) begin
                         cxof_state    <= perm_state_out;
                         msg_shift     <= {64'd0, msg_shift[255:64]};
-                        msg_remaining <= msg_remaining - 8'd8;
-                        if ((msg_remaining - 8'd8) >= 8'd8)
+                        msg_remaining <= msg_remaining_after_block;
+
+                        // Stage the next message permutation input before S_MSG_KICK/S_MSG_FIN_KICK.
+                        if (msg_remaining_after_block >= 8'd8) begin
+                            perm_state_in <= {perm_state_out[319:64],
+                                              perm_state_out[63:0] ^ msg_next_word};
                             state <= S_MSG_KICK;
-                        else
+                        end else begin
+                            perm_state_in <= {perm_state_out[319:64],
+                                              perm_state_out[63:0]
+                                              ^ (msg_next_word & mask_n(msg_remaining_after_block[3:0]))
+                                              ^ pad_val(msg_remaining_after_block[3:0])};
                             state <= S_MSG_FIN_KICK;
+                        end
                     end
                 end
 
                 S_MSG_FIN_KICK: begin
-                    perm_state_in <= {cxof_state[319:64],
-                                      cxof_state[63:0]
-                                      ^ (msg_shift[63:0] & mask_n(msg_remaining[3:0]))
-                                      ^ pad_val(msg_remaining[3:0])};
+                    // perm_state_in was staged in S_CS_FIN_WAIT or S_MSG_WAIT.
                     perm_rounds   <= 4'd12;
                     perm_start    <= 1'b1;
                     state         <= S_MSG_FIN_WAIT;
