@@ -52,6 +52,8 @@ async def run_kat(dut, kat):
     dut.msg_data.value = 0
     dut.msg_length.value = 0
     dut.out_length.value = 0
+    dut.chain_enable.value = 0
+    dut.chain_count.value = 1
     await Timer(100, units="ns")
     dut.rst_n.value = 1
     await Timer(100, units="ns")
@@ -61,6 +63,8 @@ async def run_kat(dut, kat):
     dut.msg_data.value   = bytes_to_lsb_int(kat["msg"])
     dut.msg_length.value = len(kat["msg"])
     dut.out_length.value = 32
+    dut.chain_enable.value = 0
+    dut.chain_count.value = 1
     await RisingEdge(dut.clk)
     dut.start.value = 1
     await RisingEdge(dut.clk)

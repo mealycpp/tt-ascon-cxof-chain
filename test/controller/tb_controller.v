@@ -11,6 +11,8 @@ module tb_controller ();
     reg  [255:0] msg_data;
     reg  [7:0]   msg_length;
     reg  [15:0]  out_length;
+    reg          chain_enable;
+    reg  [15:0]  chain_count;
     wire [255:0] result_data;
     wire         result_valid;
     wire         busy;
@@ -26,6 +28,8 @@ module tb_controller ();
         .msg_data     (msg_data),
         .msg_length   (msg_length),
         .out_length   (out_length),
+        .chain_enable (chain_enable),
+        .chain_count  (chain_count),
         .result_data  (result_data),
         .result_valid (result_valid),
         .busy         (busy),
