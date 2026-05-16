@@ -124,6 +124,23 @@ module cxof_controller (
         end
     endfunction
 
+
+    // ----- Select one 64-bit word from a 32-byte buffer.
+    // This replaces destructive 256-bit shift registers with small word indexes.
+    function [63:0] word_at_32;
+        input [255:0] data;
+        input [2:0]   idx;
+        begin
+            case (idx[1:0])
+                2'd0: word_at_32 = data[63:0];
+                2'd1: word_at_32 = data[127:64];
+                2'd2: word_at_32 = data[191:128];
+                2'd3: word_at_32 = data[255:192];
+                default: word_at_32 = 64'd0;
+            endcase
+        end
+    endfunction
+
     // ----- FSM states -----
     localparam S_IDLE         = 4'd0;
     localparam S_INIT_KICK    = 4'd1;
@@ -144,8 +161,9 @@ module cxof_controller (
 
     reg [3:0]   state;
     reg [319:0] cxof_state;
-    reg [255:0] cs_shift;
-    reg [255:0] msg_shift;
+    reg [2:0]   cs_word_idx;
+    reg [2:0]   msg_word_idx;
+    reg         msg_chain_source;
     reg [7:0]   cs_remaining;
     reg [7:0]   msg_remaining;
     reg [15:0]  out_remaining;
@@ -164,14 +182,22 @@ module cxof_controller (
 
     // Used to stage the next message absorption input one cycle before S_MSG_KICK.
     wire [7:0]  msg_remaining_after_block = msg_remaining - 8'd8;
-    wire [63:0] msg_next_word             = msg_shift[127:64];
+
+    wire [63:0] cs_cur_word  = word_at_32(cs_data, cs_word_idx);
+    wire [63:0] msg_cur_word = msg_chain_source
+                               ? word_at_32(result_data, msg_word_idx)
+                               : word_at_32(msg_data, msg_word_idx);
+    wire [63:0] msg_next_word = msg_chain_source
+                                ? word_at_32(result_data, msg_word_idx + 3'd1)
+                                : word_at_32(msg_data, msg_word_idx + 3'd1);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state         <= S_IDLE;
             cxof_state    <= 320'd0;
-            cs_shift      <= 256'd0;
-            msg_shift     <= 256'd0;
+            cs_word_idx   <= 3'd0;
+            msg_word_idx  <= 3'd0;
+            msg_chain_source <= 1'b0;
             cs_remaining  <= 8'd0;
             msg_remaining <= 8'd0;
             out_remaining <= 16'd0;
@@ -202,10 +228,13 @@ module cxof_controller (
                     busy <= 1'b0;
                     if (start) begin
                         // cxof_state IV injection is done in S_INIT_KICK.
-                        cs_shift      <= cs_data;
-                        msg_shift     <= msg_data;
-                        cs_remaining  <= cs_length;
-                        msg_remaining <= msg_length;
+                        // Do not copy 256-bit CS/MSG into local shift registers.
+                        // Use small word indexes into the existing input buffers instead.
+                        cs_word_idx      <= 3'd0;
+                        msg_word_idx     <= 3'd0;
+                        msg_chain_source <= 1'b0;
+                        cs_remaining     <= cs_length;
+                        msg_remaining    <= msg_length;
                         out_remaining <= chain_pass_out_length;
                         squeeze_idx   <= 5'd0;
                         passes_left   <= requested_passes;
@@ -247,7 +276,7 @@ module cxof_controller (
 
                 S_CS_KICK: begin
                     perm_state_in <= {cxof_state[319:64],
-                                      cxof_state[63:0] ^ cs_shift[63:0]};
+                                      cxof_state[63:0] ^ cs_cur_word};
                     perm_rounds   <= 4'd12;
                     perm_start    <= 1'b1;
                     state         <= S_CS_WAIT;
@@ -255,7 +284,7 @@ module cxof_controller (
                 S_CS_WAIT: begin
                     if (perm_done) begin
                         cxof_state   <= perm_state_out;
-                        cs_shift     <= {64'd0, cs_shift[255:64]};
+                        cs_word_idx  <= cs_word_idx + 3'd1;
                         cs_remaining <= cs_remaining - 8'd8;
                         if ((cs_remaining - 8'd8) >= 8'd8)
                             state <= S_CS_KICK;
@@ -267,7 +296,7 @@ module cxof_controller (
                 S_CS_FIN_KICK: begin
                     perm_state_in <= {cxof_state[319:64],
                                       cxof_state[63:0]
-                                      ^ (cs_shift[63:0] & mask_n(cs_remaining[3:0]))
+                                      ^ (cs_cur_word & mask_n(cs_remaining[3:0]))
                                       ^ pad_val(cs_remaining[3:0])};
                     perm_rounds   <= 4'd12;
                     perm_start    <= 1'b1;
@@ -281,12 +310,12 @@ module cxof_controller (
                         // This removes the critical state[9] -> perm_state_in wide mux path.
                         if (msg_remaining >= 8'd8) begin
                             perm_state_in <= {perm_state_out[319:64],
-                                              perm_state_out[63:0] ^ msg_shift[63:0]};
+                                              perm_state_out[63:0] ^ msg_cur_word};
                             state <= S_MSG_KICK;
                         end else begin
                             perm_state_in <= {perm_state_out[319:64],
                                               perm_state_out[63:0]
-                                              ^ (msg_shift[63:0] & mask_n(msg_remaining[3:0]))
+                                              ^ (msg_cur_word & mask_n(msg_remaining[3:0]))
                                               ^ pad_val(msg_remaining[3:0])};
                             state <= S_MSG_FIN_KICK;
                         end
@@ -303,7 +332,7 @@ module cxof_controller (
                 S_MSG_WAIT: begin
                     if (perm_done) begin
                         cxof_state    <= perm_state_out;
-                        msg_shift     <= {64'd0, msg_shift[255:64]};
+                        msg_word_idx  <= msg_word_idx + 3'd1;
                         msg_remaining <= msg_remaining_after_block;
 
                         // Stage the next message permutation input before S_MSG_KICK/S_MSG_FIN_KICK.
@@ -368,13 +397,15 @@ module cxof_controller (
                         passes_left   <= passes_left - 16'd1;
                         // cxof_state IV injection is done in S_INIT_KICK.
                         // Do not drive the 320-bit cxof_state mux from S_FINISH.
-                        cs_shift      <= cs_data;
-                        msg_shift     <= result_data;
-                        cs_remaining  <= cs_length;
-                        msg_remaining <= 8'd32;
-                        out_remaining <= 16'd32;
-                        squeeze_idx   <= 5'd0;
-                        result_data   <= 256'd0;
+                        // For chained passes, read the previous digest directly
+                        // as the next 32-byte message using msg_chain_source.
+                        cs_word_idx      <= 3'd0;
+                        msg_word_idx     <= 3'd0;
+                        msg_chain_source <= 1'b1;
+                        cs_remaining     <= cs_length;
+                        msg_remaining    <= 8'd32;
+                        out_remaining    <= 16'd32;
+                        squeeze_idx      <= 5'd0;
                         busy          <= 1'b1;
                         done          <= 1'b0;
                         state         <= S_INIT_KICK;
