@@ -51,7 +51,8 @@ module stream_register_file (
 
     reg [63:0] word_mux;
 
-    integer i;
+    integer init_i;
+    integer clear_i;
 
     assign in_word        = word_mux;
     assign in_word_valid  = in_word_ready;
@@ -94,8 +95,8 @@ module stream_register_file (
             result_present <= 1'b0;
             engine_busy_d  <= 1'b0;
             result_wr_idx  <= 5'd0;
-            for (i = 0; i < 32; i = i + 1) begin
-                result_mem[i] <= 8'd0;
+            for (init_i = 0; init_i < 32; init_i = init_i + 1) begin
+                result_mem[init_i] <= 8'd0;
             end
         end else begin
             engine_busy_d <= engine_busy;
@@ -123,9 +124,9 @@ module stream_register_file (
             chain_count  <= 16'd1;
             rdata        <= 8'd0;
 
-            for (i = 0; i < 32; i = i + 1) begin
-                cs_mem[i]  <= 8'd0;
-                msg_mem[i] <= 8'd0;
+            for (clear_i = 0; clear_i < 32; clear_i = clear_i + 1) begin
+                cs_mem[clear_i]  <= 8'd0;
+                msg_mem[clear_i] <= 8'd0;
             end
         end else begin
             if (we) begin
